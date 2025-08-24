@@ -122,7 +122,7 @@ class iConsoleMenuBarApp(rumps.App):
         """Update the menu bar display"""
         # Update title bar with both speed and distance
         if isinstance(speed, (int, float)) and speed > 0:
-            self.title = f"🚴 {speed:.1f} km/h • {distance:.2f} km"
+            self.title = f"🚴 {speed:.0f} km/h • {distance:.2f} km"
         else:
             self.title = f"🚴 -- • {distance:.2f} km"
         
