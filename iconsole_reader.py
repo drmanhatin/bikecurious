@@ -1,19 +1,33 @@
 #!/usr/bin/env python3
 """
-iConsole Data Reader
-Connects to iConsole exercise bike and reads real-time data
+iConsole Background Service
+Connects to iConsole exercise bike and logs real-time data to JSON
+Runs as a background service with persistent mileage tracking
 """
 
 import asyncio
 import logging
 import struct
 import time
+import json
+import os
 from datetime import datetime
 from bleak import BleakClient
 from typing import Optional, Dict, Any
+from pathlib import Path
 
-# Set up logging
-logging.basicConfig(level=logging.INFO)
+# Set up logging for background service
+log_dir = Path.home() / "Library" / "Logs" / "iConsole"
+log_dir.mkdir(parents=True, exist_ok=True)
+
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.FileHandler(log_dir / "iconsole_service.log")
+        # Removed StreamHandler for true background operation
+    ]
+)
 logger = logging.getLogger(__name__)
 
 class iConsoleDataReader:
@@ -21,7 +35,18 @@ class iConsoleDataReader:
         self.device_address = device_address
         self.client: Optional[BleakClient] = None
         self.is_connected = False
-        self.data_log = []
+        
+        # JSON data logging setup
+        self.data_dir = Path.home() / "Documents" / "iConsole_Data"
+        self.data_dir.mkdir(parents=True, exist_ok=True)
+        
+        # Data files
+        self.session_file = self.data_dir / f"session_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
+        self.distance_file = self.data_dir / "total_distance.json"
+        
+        # Load existing distance in kilometers
+        self.total_km = self._load_total_distance()
+        self.session_data = []
         
         # Exercise bike wheel simulation parameters
         # Adjusted: ~13" wheel equivalent = 1.0525m circumference (half of 26")
@@ -47,24 +72,67 @@ class iConsoleDataReader:
         self.CSC_MEASUREMENT = "00002a5b-0000-1000-8000-00805f9b34fb"
         self.CYCLING_POWER_SERVICE = "00001818-0000-1000-8000-00805f9b34fb"
         self.CYCLING_POWER_MEASUREMENT = "00002a63-0000-1000-8000-00805f9b34fb"
+    
+    def _load_total_distance(self) -> float:
+        """Load total distance in kilometers from persistent storage"""
+        try:
+            if self.distance_file.exists():
+                with open(self.distance_file, 'r') as f:
+                    data = json.load(f)
+                    return data.get('total_km', 0.0)
+        except Exception as e:
+            logger.warning(f"Could not load distance data: {e}")
+        return 0.0
+    
+    def _save_total_distance(self):
+        """Save total distance in kilometers to persistent storage"""
+        try:
+            distance_data = {
+                'total_km': self.total_km,
+                'last_updated': datetime.now().isoformat(),
+                'wheel_circumference_m': self.wheel_circumference_m
+            }
+            with open(self.distance_file, 'w') as f:
+                json.dump(distance_data, f, indent=2)
+        except Exception as e:
+            logger.error(f"Could not save distance data: {e}")
+    
+    def _log_data_to_json(self, data_entry: Dict[str, Any]):
+        """Log data entry to JSON file"""
+        try:
+            self.session_data.append(data_entry)
+            
+            # Save to session file
+            with open(self.session_file, 'w') as f:
+                json.dump(self.session_data, f, indent=2)
+                
+            # Update total distance if distance data is available
+            if 'total_distance_km' in data_entry.get('decoded_data', {}):
+                distance_km = data_entry['decoded_data']['total_distance_km']
+                if distance_km > self.total_km:
+                    self.total_km = distance_km
+                    self._save_total_distance()
+                    
+        except Exception as e:
+            logger.error(f"Could not log data to JSON: {e}")
         
     async def connect(self) -> bool:
         """Connect to the iConsole device"""
         try:
-            print(f"🔗 Connecting to {self.device_address}...")
+            logger.info(f"Connecting to {self.device_address}...")
             self.client = BleakClient(self.device_address)
             await self.client.connect()
             
             if self.client.is_connected:
                 self.is_connected = True
-                print("✅ Connected successfully!")
+                logger.info("Connected successfully!")
                 return True
             else:
-                print("❌ Failed to connect")
+                logger.error("Failed to connect")
                 return False
                 
         except Exception as e:
-            print(f"❌ Connection error: {e}")
+            logger.error(f"Connection error: {e}")
             return False
     
     async def disconnect(self):
@@ -72,27 +140,29 @@ class iConsoleDataReader:
         if self.client and self.is_connected:
             await self.client.disconnect()
             self.is_connected = False
-            print("🔌 Disconnected")
+            logger.info("Disconnected from device")
     
     async def start_data_stream(self):
         """Start reading data from the exercise bike"""
         if not self.is_connected:
-            print("❌ Not connected to device")
+            logger.error("Not connected to device")
             return
             
-        print("🚴 Starting data stream...")
-        print("📊 Real-time Exercise Data:")
-        print("=" * 60)
+        logger.info("Starting data stream...")
+        logger.info(f"Total distance so far: {self.total_km:.3f} km")
         
         # Try to subscribe to different characteristics
         await self._try_subscribe_to_characteristics()
         
-        # Keep the connection alive and display data
+        # Keep the connection alive and log data
         try:
             while True:
                 await asyncio.sleep(1)
         except KeyboardInterrupt:
-            print("\n⏹️  Stopping data stream...")
+            logger.info("Stopping data stream...")
+        except Exception as e:
+            logger.error(f"Error in data stream: {e}")
+            raise
     
     async def _try_subscribe_to_characteristics(self):
         """Try to subscribe to various fitness-related characteristics"""
@@ -107,13 +177,13 @@ class iConsoleDataReader:
         for char_uuid, char_name in characteristics_to_try:
             try:
                 await self.client.start_notify(char_uuid, self._create_notification_handler(char_name))
-                print(f"✅ Subscribed to {char_name}")
+                logger.info(f"Subscribed to {char_name}")
                 subscribed_count += 1
             except Exception as e:
                 logger.debug(f"Could not subscribe to {char_name}: {e}")
         
         if subscribed_count == 0:
-            print("⚠️  No standard characteristics found. Trying to discover custom ones...")
+            logger.warning("No standard characteristics found. Trying to discover custom ones...")
             await self._discover_and_subscribe_custom()
     
     async def _discover_and_subscribe_custom(self):
@@ -130,40 +200,58 @@ class iConsoleDataReader:
                             char.uuid, 
                             self._create_notification_handler(f"Custom-{char.uuid[:8]}")
                         )
-                        print(f"✅ Subscribed to custom characteristic: {char.uuid}")
+                        logger.info(f"Subscribed to custom characteristic: {char.uuid}")
                         subscribed_count += 1
                     except Exception as e:
                         logger.debug(f"Could not subscribe to {char.uuid}: {e}")
         
         if subscribed_count == 0:
-            print("❌ No notifiable characteristics found!")
-            print("💡 The device might use a different communication method.")
+            logger.error("No notifiable characteristics found!")
+            logger.info("The device might use a different communication method.")
     
     def _create_notification_handler(self, char_name: str):
         """Create a notification handler for a specific characteristic"""
         def notification_handler(sender, data: bytearray):
-            timestamp = datetime.now().strftime("%H:%M:%S")
+            timestamp = datetime.now().isoformat()
             
             # Log raw data
             raw_hex = data.hex()
-            print(f"\n📡 [{timestamp}] {char_name}")
-            print(f"   Raw data: {raw_hex}")
-            print(f"   Length: {len(data)} bytes")
+            logger.debug(f"[{timestamp}] {char_name} - Raw: {raw_hex} ({len(data)} bytes)")
             
             # Try to decode the data
             decoded_data = self._decode_data(data, char_name)
-            if decoded_data:
-                self._display_decoded_data(decoded_data)
             
-            # Store for analysis
-            self.data_log.append({
+            # Create data entry
+            data_entry = {
                 'timestamp': timestamp,
                 'characteristic': char_name,
                 'raw_data': raw_hex,
-                'decoded_data': decoded_data
-            })
+                'decoded_data': decoded_data or {}
+            }
+            
+            # Log key metrics
+            if decoded_data:
+                self._log_key_metrics(decoded_data)
+            
+            # Save to JSON
+            self._log_data_to_json(data_entry)
             
         return notification_handler
+    
+    def _log_key_metrics(self, data: Dict[str, Any]):
+        """Log key exercise metrics"""
+        metrics = []
+        if 'calculated_speed_kmh' in data:
+            metrics.append(f"Speed: {data['calculated_speed_kmh']:.1f} km/h")
+        if 'total_distance_km' in data:
+            metrics.append(f"Distance: {data['total_distance_km']:.3f} km")
+        if 'calculated_cadence_rpm' in data:
+            metrics.append(f"Cadence: {data['calculated_cadence_rpm']:.1f} RPM")
+        if 'instantaneous_power_watts' in data:
+            metrics.append(f"Power: {data['instantaneous_power_watts']} W")
+            
+        if metrics:
+            logger.info(" | ".join(metrics))
     
     def _decode_data(self, data: bytearray, char_name: str) -> Optional[Dict[str, Any]]:
         """Attempt to decode the raw data based on characteristic type"""
@@ -339,47 +427,14 @@ class iConsoleDataReader:
             
         return decoded
     
-    def _display_decoded_data(self, data: Dict[str, Any]):
-        """Display decoded data in a readable format"""
-        print("   📈 Decoded values:")
-        
-        # Show calculated metrics first (most important)
-        if 'calculated_speed_kmh' in data:
-            print(f"      🚴 Speed: {data['calculated_speed_kmh']:.1f} km/h")
-        if 'total_distance_km' in data:
-            print(f"      📏 Distance: {data['total_distance_km']:.3f} km")
-        if 'calculated_cadence_rpm' in data:
-            print(f"      🔄 Cadence: {data['calculated_cadence_rpm']:.1f} RPM")
-            
-        # Show other metrics
-        for key, value in data.items():
-            if key.startswith('calculated_') or key.startswith('total_'):
-                continue  # Already shown above
-            elif 'speed' in key.lower() and 'calculated' not in key:
-                print(f"      🏃 Raw Speed: {value} km/h")
-            elif 'cadence' in key.lower() and 'calculated' not in key:
-                print(f"      🔄 Raw Cadence: {value} RPM")
-            elif 'power' in key.lower():
-                print(f"      ⚡ Power: {value} watts")
-            elif 'distance' in key.lower() and 'total' not in key:
-                print(f"      📏 Raw Distance: {value} m")
-            elif 'heart' in key.lower():
-                print(f"      ❤️  Heart Rate: {value} BPM")
-            elif key in ['wheel_revolutions', 'crank_revolutions']:
-                print(f"      🔢 {key.replace('_', ' ').title()}: {value}")
-            elif not key.startswith('flags') and not key.endswith('_time'):
-                print(f"      📊 {key}: {value}")
-
 async def main():
-    print("🚴 iConsole Data Reader")
-    print("=" * 30)
+    """Main function for background service"""
+    # Use the known device address from connect_iconsole.py
+    device_address = "5F1372D5-7528-C321-9A48-87BA1DBA6FB9"
     
-    # Get device address from user
-    device_address = input("Enter the Bluetooth address of your iConsole device: ").strip()
-    
-    if not device_address:
-        print("❌ No device address provided")
-        return
+    logger.info("iConsole Background Service Starting")
+    logger.info(f"Device: iConsole+0462 ({device_address})")
+    logger.info(f"Data directory: {Path.home() / 'Documents' / 'iConsole_Data'}")
     
     # Create reader and connect
     reader = iConsoleDataReader(device_address)
@@ -388,17 +443,25 @@ async def main():
         if await reader.connect():
             await reader.start_data_stream()
     except KeyboardInterrupt:
-        print("\n⏹️  Stopping...")
+        logger.info("Service stopped by user")
+    except Exception as e:
+        logger.error(f"Service error: {e}")
+        raise
     finally:
         await reader.disconnect()
         
         # Show summary
-        if reader.data_log:
-            print(f"\n📋 Captured {len(reader.data_log)} data packets")
-            print("💾 Data logged for analysis")
+        if reader.session_data:
+            logger.info(f"Session complete: {len(reader.session_data)} data packets logged")
+            logger.info(f"Total distance: {reader.total_km:.3f} km")
+        else:
+            logger.warning("No data was captured during this session")
 
 if __name__ == "__main__":
     try:
         asyncio.run(main())
     except KeyboardInterrupt:
-        print("\n👋 Goodbye!")
+        logger.info("Service interrupted by user")
+    except Exception as e:
+        logger.error(f"Service failed: {e}")
+        raise
