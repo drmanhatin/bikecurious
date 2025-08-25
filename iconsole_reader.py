@@ -11,7 +11,7 @@ import time
 import json
 import threading
 from datetime import datetime
-from bleak import BleakClient
+from bleak import BleakClient, BleakScanner
 from typing import Optional, Dict, Any, List
 from pathlib import Path
 from menubar_app import main as menubar_main
@@ -31,8 +31,8 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 class iConsoleDataReader:
-    def __init__(self, device_address: str):
-        self.device_address = device_address
+    def __init__(self):
+        self.device_address = None
         self.client: Optional[BleakClient] = None
         self.is_connected = False
         self.menubar_app = None
@@ -57,10 +57,7 @@ class iConsoleDataReader:
         self.update_thread = None
         self.stop_updates = False
         
-        # BLE characteristics
-        self.INDOOR_BIKE_DATA = "00002ad2-0000-1000-8000-00805f9b34fb"
-        self.CSC_MEASUREMENT = "00002a5b-0000-1000-8000-00805f9b34fb"
-        self.CYCLING_POWER_MEASUREMENT = "00002a63-0000-1000-8000-00805f9b34fb"
+
     
     def _load_total_distance(self) -> float:
         """Load total distance from file"""
@@ -101,8 +98,6 @@ class iConsoleDataReader:
                 cutoff_time = current_time - 3.0
                 recent_datapoints = [dp for dp in self.speed_datapoints if True]  # Keep all for now, filter by time
                 
-                logger.debug(f"Update cycle: {len(recent_datapoints)} datapoints, current_speed: {self.current_speed:.1f}")
-                
                 if recent_datapoints:
                     # Average speed from recent datapoints
                     old_speed = self.current_speed
@@ -119,19 +114,17 @@ class iConsoleDataReader:
                         if self.current_speed < 0.1:
                             self.current_speed = 0.0
                         if old_speed != self.current_speed:
-                            logger.debug(f"Speed decay: {old_speed:.1f} -> {self.current_speed:.1f} km/h (no data for {time_since_data:.1f}s)")
+                            pass
             
             # Add distance based on current speed (distance = speed * time)
             if self.current_speed > 0:
                 distance_increment = (self.current_speed / 3600.0)  # km per second
                 self.total_distance_km += distance_increment
                 self._save_total_distance()
-                logger.debug(f"Distance increment: +{distance_increment*1000:.1f}m, total: {self.total_distance_km:.3f}km")
             
             # Update menu bar
             if self.menubar_app:
                 self.menubar_app.update_display(self.current_speed, self.total_distance_km)
-                logger.debug(f"Menu bar updated: {self.current_speed:.1f} km/h, {self.total_distance_km:.3f} km")
             else:
                 logger.warning("Menu bar app not available")
             
@@ -151,8 +144,34 @@ class iConsoleDataReader:
         if self.update_thread:
             self.update_thread.join()
     
+    async def find_iconsole_device(self) -> bool:
+        """Find and set iConsole device"""
+        logger.info("Scanning for iConsole devices...")
+        
+        while True:
+            try:
+                scanner = BleakScanner()
+                devices = await scanner.discover(timeout=10.0)
+                
+                for device in devices:
+                    if device.name and "iconsole" in device.name.lower():
+                        self.device_address = device.address
+                        logger.info(f"Found iConsole device: {device.name} ({device.address})")
+                        return True
+                
+                logger.warning("No iConsole devices found, retrying in 5 seconds...")
+                await asyncio.sleep(5.0)
+                
+            except Exception as e:
+                logger.error(f"Error scanning for devices: {e}")
+                await asyncio.sleep(5.0)
+    
     async def connect(self) -> bool:
         """Connect to the device"""
+        if not self.device_address:
+            if not await self.find_iconsole_device():
+                return False
+        
         try:
             logger.info(f"Connecting to {self.device_address}...")
             self.client = BleakClient(self.device_address)
@@ -201,24 +220,27 @@ class iConsoleDataReader:
     
     async def _subscribe_to_characteristics(self):
         """Subscribe to bike data characteristics"""
-        characteristics = [
-            (self.INDOOR_BIKE_DATA, "Indoor Bike"),
-            (self.CSC_MEASUREMENT, "Speed & Cadence"),
-            (self.CYCLING_POWER_MEASUREMENT, "Power"),
-        ]
+        logger.info("Discovering and subscribing to available characteristics...")
         
         subscribed_count = 0
-        for char_uuid, name in characteristics:
-            try:
-                await self.client.start_notify(char_uuid, self._create_handler(name))
-                logger.info(f"Successfully subscribed to {name} ({char_uuid})")
-                subscribed_count += 1
-            except Exception as e:
-                logger.warning(f"Could not subscribe to {name} ({char_uuid}): {e}")
+        services = self.client.services
+        
+        for service in services:
+            logger.info(f"Service: {service.uuid}")
+            for char in service.characteristics:
+                logger.info(f"  Characteristic: {char.uuid} - Properties: {char.properties}")
+                
+                # Try to subscribe to any characteristic that supports notifications
+                if "notify" in char.properties or "indicate" in char.properties:
+                    try:
+                        await self.client.start_notify(char.uuid, self._create_handler(f"Service-{service.uuid[:8]}-{char.uuid[:8]}"))
+                        logger.info(f"  -> Successfully subscribed to {char.uuid}")
+                        subscribed_count += 1
+                    except Exception as e:
+                        logger.warning(f"  -> Could not subscribe to {char.uuid}: {e}")
         
         if subscribed_count == 0:
-            logger.error("No characteristics subscribed! Trying to discover all available...")
-            await self._discover_all_characteristics()
+            logger.error("No characteristics could be subscribed to!")
         else:
             logger.info(f"Successfully subscribed to {subscribed_count} characteristics")
     
@@ -236,13 +258,14 @@ class iConsoleDataReader:
     def _extract_speed(self, data: bytearray, char_name: str) -> Optional[float]:
         """Extract speed from BLE data"""
         try:
-            if "Indoor Bike" in char_name and len(data) >= 4:
+            # Try different data formats based on characteristic name
+            if "2ad2" in char_name and len(data) >= 4:  # Indoor Bike Data
                 flags = struct.unpack('<H', data[:2])[0]
                 if flags & 0x01:  # Speed present
                     speed = struct.unpack('<H', data[2:4])[0] / 100.0  # km/h
                     return speed
             
-            elif "Speed" in char_name and len(data) >= 7:
+            elif "2a5b" in char_name and len(data) >= 7:  # Speed & Cadence
                 flags = data[0]
                 if flags & 0x01:  # Wheel data present
                     # Extract wheel revolution data
@@ -275,33 +298,25 @@ class iConsoleDataReader:
                     self.last_wheel_revs = wheel_revs
                     self.last_wheel_time = wheel_time
             
+            # Generic speed extraction for unknown characteristics
+            elif len(data) >= 2:
+                # Try to interpret as simple speed value
+                try:
+                    speed = struct.unpack('<H', data[:2])[0] / 100.0
+                    if 0 <= speed <= 100:  # Reasonable speed range
+                        return speed
+                except:
+                    pass
+            
         except Exception as e:
             logger.debug(f"Error extracting speed from {char_name}: {e}")
         
         return None
     
-    async def _discover_all_characteristics(self):
-        """Discover and try to subscribe to all available characteristics"""
-        logger.info("Discovering all available characteristics...")
-        services = self.client.services
-        
-        for service in services:
-            logger.info(f"Service: {service.uuid}")
-            for char in service.characteristics:
-                logger.info(f"  Characteristic: {char.uuid} - Properties: {char.properties}")
-                
-                # Try to subscribe to any characteristic that supports notifications
-                if "notify" in char.properties or "indicate" in char.properties:
-                    try:
-                        await self.client.start_notify(char.uuid, self._create_handler(f"Custom-{char.uuid[:8]}"))
-                        logger.info(f"  -> Subscribed to {char.uuid}")
-                    except Exception as e:
-                        logger.debug(f"  -> Could not subscribe to {char.uuid}: {e}")
+
 
 def main():
     """Main function"""
-    device_address = "5F1372D5-7528-C321-9A48-87BA1DBA6FB9"
-    
     logger.info("iConsole Service Starting")
     
     # Create a simple shared object to pass the menubar app
@@ -314,14 +329,16 @@ def main():
             while shared['menubar_app'] is None:
                 await asyncio.sleep(0.1)
             
-            # Create reader with menubar app
-            reader = iConsoleDataReader(device_address)
+            # Create reader (will scan for iConsole devices automatically)
+            reader = iConsoleDataReader()
             reader.menubar_app = shared['menubar_app']
             shared['reader'] = reader
             
             try:
                 if await reader.connect():
                     await reader.start_data_stream()
+                else:
+                    logger.error("Failed to connect to iConsole device")
             except KeyboardInterrupt:
                 logger.info("Service stopped")
             finally:

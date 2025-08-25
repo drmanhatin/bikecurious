@@ -1,0 +1,29 @@
+<svg width="128" height="128" viewBox="0 0 128 128" xmlns="http://www.w3.org/2000/svg">
+  <!-- Background circle -->
+  <circle cx="64" cy="64" r="60" fill="#007AFF" stroke="#0056CC" stroke-width="2"/>
+  
+  <!-- Bike icon -->
+  <g transform="translate(64, 64)">
+    <!-- Wheels -->
+    <circle cx="-25" cy="15" r="12" fill="none" stroke="white" stroke-width="3"/>
+    <circle cx="25" cy="15" r="12" fill="none" stroke="white" stroke-width="3"/>
+    
+    <!-- Frame -->
+    <path d="M -25 15 L -10 -5 L 10 -5 L 25 15" fill="none" stroke="white" stroke-width="3" stroke-linejoin="round"/>
+    <path d="M -10 -5 L 5 15" fill="none" stroke="white" stroke-width="3"/>
+    <path d="M 0 15 L 10 -5" fill="none" stroke="white" stroke-width="3"/>
+    
+    <!-- Handlebars -->
+    <path d="M -10 -5 L -10 -15 M -15 -15 L -5 -15" fill="none" stroke="white" stroke-width="3" stroke-linecap="round"/>
+    
+    <!-- Seat -->
+    <path d="M 5 -8 L 15 -8" fill="none" stroke="white" stroke-width="4" stroke-linecap="round"/>
+    
+    <!-- Pedal -->
+    <circle cx="0" cy="15" r="3" fill="white"/>
+  </g>
+  
+  <!-- Speed indicator -->
+  <path d="M 20 30 Q 35 25 50 30" fill="none" stroke="white" stroke-width="2" stroke-linecap="round" opacity="0.8"/>
+  <path d="M 78 30 Q 93 25 108 30" fill="none" stroke="white" stroke-width="2" stroke-linecap="round" opacity="0.8"/>
+</svg>

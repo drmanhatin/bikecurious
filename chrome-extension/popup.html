@@ -1,0 +1,74 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <link rel="stylesheet" href="popup.css">
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <div class="icon">🚴</div>
+            <h1>iConsole Tracker</h1>
+        </div>
+        
+        <div class="status-section">
+            <div class="connection-status" id="connectionStatus">
+                <div class="status-indicator" id="statusIndicator"></div>
+                <span id="statusText">Disconnected</span>
+            </div>
+        </div>
+        
+        <div class="data-section">
+            <div class="data-item">
+                <div class="data-label">Current Speed</div>
+                <div class="data-value" id="currentSpeed">-- km/h</div>
+            </div>
+            
+            <div class="data-item">
+                <div class="data-label">Total Distance</div>
+                <div class="data-value" id="totalDistance">-- km</div>
+            </div>
+        </div>
+        
+        <div class="controls-section">
+            <button id="connectBtn" class="primary-btn">Connect to Bike</button>
+            <button id="disconnectBtn" class="secondary-btn" style="display: none;">Disconnect</button>
+        </div>
+        
+        <div class="youtube-section" id="youtubeSection" style="display: none;">
+            <div class="section-header">
+                <h3>📺 YouTube Integration</h3>
+            </div>
+            <div class="youtube-controls">
+                <label class="checkbox-label">
+                    <input type="checkbox" id="youtubeEnabled">
+                    <span>Auto-pause videos when not biking</span>
+                </label>
+                <div class="setting-item">
+                    <label for="pauseDelay">Pause delay:</label>
+                    <select id="pauseDelay">
+                        <option value="1">1 second</option>
+                        <option value="3" selected>3 seconds</option>
+                        <option value="5">5 seconds</option>
+                        <option value="10">10 seconds</option>
+                    </select>
+                </div>
+            </div>
+        </div>
+        
+        <div class="info-section">
+            <div class="info-text">
+                <p>Click "Connect to Bike" to pair with your iConsole exercise bike via Bluetooth.</p>
+                <p>Speed and distance data will be logged to the console and displayed here.</p>
+                <p id="youtubeInfo" style="display: none;">🎬 YouTube integration active - videos will pause when you stop biking!</p>
+            </div>
+        </div>
+        
+        <div class="footer">
+            <div class="version">v1.0</div>
+        </div>
+    </div>
+    
+    <script src="popup.js"></script>
+</body>
+</html>
