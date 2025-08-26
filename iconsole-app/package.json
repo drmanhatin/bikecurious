@@ -1,0 +1,44 @@
+{
+  "name": "iconsole-app",
+  "version": "1.0.0",
+  "main": "index.js",
+  "scripts": {
+    "start": "react-native start",
+    "android": "expo run:android",
+    "ios": "expo run:ios",
+    "logs:android": "react-native log-android",
+    "logs:ios": "react-native log-ios",
+    "prebuild": "expo prebuild",
+    "build:android": "cd android && ./gradlew assembleRelease",
+    "build:ios": "cd ios && xcodebuild -workspace iconsoleapp.xcworkspace -scheme iconsoleapp -configuration Release"
+  },
+  "dependencies": {
+    "@notifee/react-native": "^9.1.8",
+    "@react-native-async-storage/async-storage": "2.1.2",
+    "@react-native-community/netinfo": "^11.4.1",
+    "buffer": "^6.0.3",
+    "expo": "~53.0.22",
+    "expo-background-fetch": "~13.1.6",
+    "expo-build-properties": "~0.14.8",
+    "expo-constants": "~17.1.7",
+    "expo-dev-client": "~5.2.4",
+    "expo-device": "~7.1.4",
+    "expo-keep-awake": "~14.1.4",
+    "expo-location": "~18.1.6",
+    "expo-notifications": "~0.31.4",
+    "expo-status-bar": "~2.2.3",
+    "expo-task-manager": "~13.1.6",
+    "react": "19.0.0",
+    "react-native": "0.79.5",
+    "react-native-ble-plx": "^3.5.0",
+    "react-native-elements": "^3.4.3",
+    "react-native-paper": "^5.14.5",
+    "react-native-safe-area-context": "5.4.0",
+    "react-native-vector-icons": "^10.3.0"
+  },
+  "devDependencies": {
+    "@babel/core": "^7.20.0",
+    "@react-native-community/cli": "^20.0.1"
+  },
+  "private": true
+}

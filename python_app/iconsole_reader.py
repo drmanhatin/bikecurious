@@ -80,6 +80,11 @@ class iConsoleDataReader:
     
     def _add_speed_datapoint(self, speed: float):
         """Add a speed datapoint"""
+        # Discard unrealistic speed readings over 50 km/h
+        if speed > 50.0:
+            logger.warning(f"Discarding unrealistic speed reading: {speed:.1f} km/h (over 50 km/h limit)")
+            return
+        
         current_time = time.time()
         with self.datapoints_lock:
             self.speed_datapoints.append(speed)
