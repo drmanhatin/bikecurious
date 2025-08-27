@@ -4,10 +4,10 @@
     "slug": "iconsole-app",
     "version": "1.0.0",
     "orientation": "portrait",
-    "userInterfaceStyle": "light",
+    "userInterfaceStyle": "dark",
     "splash": {
       "resizeMode": "contain",
-      "backgroundColor": "#2196F3"
+      "backgroundColor": "#121212"
     },
     "assetBundlePatterns": [
       "**/*"
@@ -28,9 +28,16 @@
     },
     "android": {
       "adaptiveIcon": {
-        "backgroundColor": "#2196F3"
+        "backgroundColor": "#121212"
       },
       "edgeToEdgeEnabled": false,
+      "navigationBar": {
+        "backgroundColor": "#1F1F1F"
+      },
+      "statusBar": {
+        "backgroundColor": "#121212",
+        "barStyle": "light-content"
+      },
       "permissions": [
         "android.permission.BLUETOOTH",
         "android.permission.BLUETOOTH_ADMIN",
@@ -56,6 +63,8 @@
       "expo-notifications",
       "expo-background-fetch",
       "expo-task-manager",
+      "expo-navigation-bar",
+      "expo-system-ui",
       [
         "expo-build-properties",
         {
@@ -64,7 +73,8 @@
             "targetSdkVersion": 33
           }
         }
-      ]
+      ],
+      "expo-font"
     ],
     "extra": {
       "eas": {

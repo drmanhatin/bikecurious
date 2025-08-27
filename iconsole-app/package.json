@@ -13,6 +13,7 @@
     "build:ios": "cd ios && xcodebuild -workspace iconsoleapp.xcworkspace -scheme iconsoleapp -configuration Release"
   },
   "dependencies": {
+    "@expo-google-fonts/merriweather": "^0.4.1",
     "@notifee/react-native": "^9.1.8",
     "@react-native-async-storage/async-storage": "2.1.2",
     "@react-native-community/netinfo": "^11.4.1",
@@ -23,17 +24,23 @@
     "expo-constants": "~17.1.7",
     "expo-dev-client": "~5.2.4",
     "expo-device": "~7.1.4",
+    "expo-font": "~13.3.2",
     "expo-keep-awake": "~14.1.4",
+    "expo-linear-gradient": "~14.1.5",
     "expo-location": "~18.1.6",
+    "expo-navigation-bar": "^4.2.7",
     "expo-notifications": "~0.31.4",
     "expo-status-bar": "~2.2.3",
+    "expo-system-ui": "^5.0.10",
     "expo-task-manager": "~13.1.6",
     "react": "19.0.0",
     "react-native": "0.79.5",
     "react-native-ble-plx": "^3.5.0",
     "react-native-elements": "^3.4.3",
+    "react-native-gifted-charts": "^1.4.63",
     "react-native-paper": "^5.14.5",
     "react-native-safe-area-context": "5.4.0",
+    "react-native-svg": "^15.12.1",
     "react-native-vector-icons": "^10.3.0"
   },
   "devDependencies": {
