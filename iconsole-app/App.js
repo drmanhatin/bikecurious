@@ -221,7 +221,7 @@ export default function App() {
       generateSampleData();
       
       // Start background services for notifications and data sync
-      await BackgroundService.startBackgroundServices();
+      // await BackgroundService.startBackgroundServices();
       
       // Start foreground service for continuous operation
       await ForegroundService.startForegroundService();

@@ -15,7 +15,51 @@ class ForegroundService {
     this.notificationSetupComplete = false;
     this.lastNotificationUpdate = 0;
     this.notificationThrottleMs = 1000; // Minimum 1 second between notification updates
+    this.notificationCheckInterval = null; // Periodic check to ensure notification exists
     // DON'T call setupNotificationHandlers() in constructor - it blocks the main thread
+  }
+
+  // Helper method to create consistent notification configuration
+  createNotificationConfig(title, body, options = {}) {
+    const {
+      progress = null,
+      style = null,
+      connectionStatus = BluetoothService.isConnected ? '🟢' : '🔴'
+    } = options;
+
+    const notification = {
+      id: this.notificationId,
+      title: title || `🚴 iConsole Tracker ${connectionStatus}`,
+      body: body || 'Speed: 0.0 km/h • Distance: 0.00 km',
+    };
+
+    // Platform-specific configuration
+    if (Platform.OS === 'android') {
+      notification.android = {
+        channelId: 'iconsole-foreground',
+        asForegroundService: true,
+        importance: AndroidImportance.LOW, // LOW prevents pop-ups but keeps notification visible
+        visibility: AndroidVisibility.PUBLIC, // Visible in notification panel
+        ongoing: true, // Makes notification persistent
+        autoCancel: false, // Prevents auto-dismissal
+        onlyAlertOnce: true, // Only alert once, not on updates
+        smallIcon: 'ic_launcher',
+        largeIcon: 'ic_launcher',
+        silent: true, // Silent notification
+        showWhen: false, // No timestamp
+        localOnly: true, // Keep notification local to device
+        ...(progress && { progress }),
+        ...(style && { style }),
+      };
+    } else if (Platform.OS === 'ios') {
+      notification.ios = {
+        sound: null, // Silent for iOS
+        badge: 1,
+        categoryId: 'iconsole-tracker',
+      };
+    }
+
+    return notification;
   }
 
   async setupNotificationHandlers() {
@@ -29,11 +73,12 @@ class ForegroundService {
         await notifee.createChannel({
           id: 'iconsole-foreground',
           name: 'iConsole Tracker',
-          importance: AndroidImportance.HIGH,
-          visibility: AndroidVisibility.PUBLIC,
+          importance: AndroidImportance.LOW, // LOW prevents pop-ups but keeps notification visible
+          visibility: AndroidVisibility.PUBLIC, // PUBLIC keeps notification visible in panel
           description: 'Shows current speed and distance while tracking',
-          bypassDnd: true,
-          sound: 'default', // Add sound to make it more persistent
+          bypassDnd: false, // Respects Do Not Disturb settings
+          enableVibration: false, // No vibration
+          enableLights: false, // No LED lights
         });
         console.log('📱 Android notification channel created');
 
@@ -58,11 +103,26 @@ class ForegroundService {
         console.log('📱 iOS notification categories created');
       }
 
-      // Set up background event handler to eliminate warnings
-      notifee.onBackgroundEvent(async ({ type, detail }) => {
+      // Set up background event handler to handle notification dismissal
+      notifee.onForegroundEvent(async ({ type, detail }) => {
         console.log('📱 Background notification event:', type, detail);
-        // Handle notification interactions when app is in background
-        // For now, just log the event since we don't need user interactions
+        
+        // Handle notification dismissal - recreate it immediately
+        if (type === 0 && detail.notification?.id === this.notificationId) { // EventType.DISMISSED = 1
+          console.log('⚠️ Foreground notification was dismissed - recreating it');
+          
+          // Recreate the notification immediately to maintain foreground service
+          setTimeout(async () => {
+            try {
+              const speed = BluetoothService.currentSpeed || 0;
+              const distance = BluetoothService.totalDistance || 0;
+              await this.showForegroundNotification(speed, distance);
+              console.log('✅ Notification recreated after dismissal');
+            } catch (error) {
+              console.error('❌ Failed to recreate notification after dismissal:', error);
+            }
+          }, 100); // Small delay to ensure the dismissal is processed
+        }
       });
       
     } catch (error) {
@@ -214,19 +274,10 @@ class ForegroundService {
     try {
       const connectionStatus = BluetoothService.isConnected ? '🟢' : '🔴';
       
-      await notifee.displayNotification({
-        id: this.notificationId,
-        title: `🚴 iConsole Tracker ${connectionStatus}`,
-        body: `Speed: 0.0 km/h • Distance: 0.00 km`,
-        android: {
-          channelId: 'iconsole-foreground',
-          asForegroundService: true, // This is the key property!
-          importance: AndroidImportance.HIGH,
-          visibility: AndroidVisibility.PUBLIC,
-          ongoing: true,
-          autoCancel: false,
-          smallIcon: 'ic_launcher',
-          largeIcon: 'ic_launcher',
+      const notification = this.createNotificationConfig(
+        `🚴 iConsole Tracker ${connectionStatus}`,
+        `Speed: 0.0 km/h • Distance: 0.00 km`,
+        {
           progress: {
             max: 50,
             current: 0,
@@ -236,9 +287,11 @@ class ForegroundService {
             type: 1, // BigTextStyle
             text: `Current Speed: 0.0 km/h\nTotal Distance: 0.00 km\nConnection: ${BluetoothService.isConnected ? 'Connected' : 'Disconnected'}`,
           },
-        },
-      });
+          connectionStatus
+        }
+      );
       
+      await notifee.displayNotification(notification);
       console.log('📱 Foreground service notification created and displayed');
     } catch (error) {
       console.error('❌ Failed to create foreground service notification:', error);
@@ -302,6 +355,9 @@ class ForegroundService {
     }, 3000); // Every 3 seconds
 
     console.log('🔄 Started continuous updates in foreground service (every 3s) - USING REAL SENSOR DATA');
+    
+    // Start periodic notification existence check
+    this.startNotificationWatchdog();
   }
 
   async startContinuousUpdatesInServiceAsync() {
@@ -396,6 +452,42 @@ class ForegroundService {
     });
   }
 
+  startNotificationWatchdog() {
+    // Clear any existing watchdog
+    if (this.notificationCheckInterval) {
+      clearInterval(this.notificationCheckInterval);
+    }
+
+    // Check every 10 seconds if notification still exists
+    this.notificationCheckInterval = setInterval(async () => {
+      try {
+        // Get all active notifications
+        const notifications = await notifee.getDisplayedNotifications();
+        const ourNotification = notifications.find(n => n.id === this.notificationId);
+        
+        if (!ourNotification && this.isRunning) {
+          console.log('⚠️ Foreground notification missing - recreating it');
+          const speed = BluetoothService.currentSpeed || 0;
+          const distance = BluetoothService.totalDistance || 0;
+          await this.showForegroundNotification(speed, distance);
+          console.log('✅ Missing notification recreated by watchdog');
+        }
+      } catch (error) {
+        console.error('❌ Notification watchdog error:', error);
+      }
+    }, 10000); // Every 10 seconds
+
+    console.log('🐕 Notification watchdog started (checking every 10s)');
+  }
+
+  stopNotificationWatchdog() {
+    if (this.notificationCheckInterval) {
+      clearInterval(this.notificationCheckInterval);
+      this.notificationCheckInterval = null;
+      console.log('🛑 Notification watchdog stopped');
+    }
+  }
+
   async startReconnectionProcess() {
     if (this.isReconnecting) {
       console.log('⚠️ Reconnection already in progress');
@@ -468,19 +560,10 @@ class ForegroundService {
         ? `Reconnecting... (${this.reconnectAttempts}/${this.maxReconnectAttempts})`
         : 'Disconnected';
       
-      await notifee.displayNotification({
-        id: this.notificationId,
-        title: `🚴 iConsole Tracker ${connectionStatus}`,
-        body: `${statusText} • Speed: ${BluetoothService.currentSpeed?.toFixed(1) || '0.0'} km/h`,
-        android: {
-          channelId: 'iconsole-foreground',
-          asForegroundService: true,
-          importance: AndroidImportance.HIGH,
-          visibility: AndroidVisibility.PUBLIC,
-          ongoing: true,
-          autoCancel: false,
-          smallIcon: 'ic_launcher',
-          largeIcon: 'ic_launcher',
+      const notification = this.createNotificationConfig(
+        `🚴 iConsole Tracker ${connectionStatus}`,
+        `${statusText} • Speed: ${BluetoothService.currentSpeed?.toFixed(1) || '0.0'} km/h`,
+        {
           progress: {
             max: this.maxReconnectAttempts,
             current: this.reconnectAttempts,
@@ -490,8 +573,11 @@ class ForegroundService {
             type: 1, // BigTextStyle
             text: `Status: ${statusText}\nCurrent Speed: ${BluetoothService.currentSpeed?.toFixed(1) || '0.0'} km/h\nTotal Distance: ${BluetoothService.totalDistance?.toFixed(2) || '0.00'} km`,
           },
-        },
-      });
+          connectionStatus
+        }
+      );
+      
+      await notifee.displayNotification(notification);
     } catch (error) {
       console.error('❌ Failed to update notification for reconnection:', error);
     }
@@ -499,25 +585,19 @@ class ForegroundService {
 
   async updateNotificationForFailedReconnection() {
     try {
-      await notifee.displayNotification({
-        id: this.notificationId,
-        title: `🚴 iConsole Tracker 🔴`,
-        body: `Connection Failed • Speed: ${BluetoothService.currentSpeed?.toFixed(1) || '0.0'} km/h`,
-        android: {
-          channelId: 'iconsole-foreground',
-          asForegroundService: true,
-          importance: AndroidImportance.HIGH,
-          visibility: AndroidVisibility.PUBLIC,
-          ongoing: true,
-          autoCancel: false,
-          smallIcon: 'ic_launcher',
-          largeIcon: 'ic_launcher',
+      const notification = this.createNotificationConfig(
+        `🚴 iConsole Tracker 🔴`,
+        `Connection Failed • Speed: ${BluetoothService.currentSpeed?.toFixed(1) || '0.0'} km/h`,
+        {
           style: {
             type: 1, // BigTextStyle
             text: `Status: Connection Failed - Manual reconnection required\nLast Speed: ${BluetoothService.currentSpeed?.toFixed(1) || '0.0'} km/h\nTotal Distance: ${BluetoothService.totalDistance?.toFixed(2) || '0.00'} km`,
           },
-        },
-      });
+          connectionStatus: '🔴'
+        }
+      );
+      
+      await notifee.displayNotification(notification);
     } catch (error) {
       console.error('❌ Failed to update notification for failed reconnection:', error);
     }
@@ -533,23 +613,10 @@ class ForegroundService {
     try {
       const connectionStatus = BluetoothService.isConnected ? '🟢' : '🔴';
       
-      const notification = {
-        id: this.notificationId,
-        title: `🚴 iConsole Tracker ${connectionStatus}`,
-        body: `Speed: ${speed.toFixed(1)} km/h • Distance: ${distance.toFixed(2)} km`,
-      };
-
-      // Platform-specific configuration
-      if (Platform.OS === 'android') {
-        notification.android = {
-          channelId: 'iconsole-foreground',
-          importance: AndroidImportance.HIGH, // Changed from LOW to HIGH for background updates
-          visibility: AndroidVisibility.PUBLIC,
-          ongoing: true, // Makes it persistent
-          autoCancel: false,
-          smallIcon: 'ic_launcher',
-          largeIcon: 'ic_launcher',
-          asForegroundService: true,
+      const notification = this.createNotificationConfig(
+        `🚴 iConsole Tracker ${connectionStatus}`,
+        `Speed: ${speed.toFixed(1)} km/h • Distance: ${distance.toFixed(2)} km`,
+        {
           progress: {
             max: 50, // Max speed for progress bar
             current: Math.min(speed, 50),
@@ -559,17 +626,11 @@ class ForegroundService {
             type: 1, // BigTextStyle
             text: `Current Speed: ${speed.toFixed(1)} km/h\nTotal Distance: ${distance.toFixed(2)} km\nConnection: ${BluetoothService.isConnected ? 'Connected' : 'Disconnected'}`,
           },
-        };
-      } else if (Platform.OS === 'ios') {
-        notification.ios = {
-          sound: 'default',
-          badge: 1,
-          categoryId: 'iconsole-tracker',
-        };
-      }
+          connectionStatus
+        }
+      );
       
       await notifee.displayNotification(notification);
-      
       console.log(`📱 Notification displayed: Speed: ${speed.toFixed(1)} km/h • Distance: ${distance.toFixed(2)} km`);
     } catch (error) {
       // Only log foreground service errors once to avoid spam
@@ -597,22 +658,10 @@ class ForegroundService {
 
       const connectionStatus = BluetoothService.isConnected ? '🟢' : '🔴';
       
-      const notification = {
-        id: this.notificationId,
-        title: `🚴 iConsole Tracker ${connectionStatus}`,
-        body: `Speed: ${speed.toFixed(1)} km/h • Distance: ${distance.toFixed(2)} km`,
-      };
-
-      // Platform-specific configuration
-      if (Platform.OS === 'android') {
-        notification.android = {
-          channelId: 'iconsole-foreground',
-          importance: AndroidImportance.HIGH,
-          visibility: AndroidVisibility.PUBLIC,
-          ongoing: true,
-          autoCancel: false,
-          smallIcon: 'ic_launcher',
-          asForegroundService: true,
+      const notification = this.createNotificationConfig(
+        `🚴 iConsole Tracker ${connectionStatus}`,
+        `Speed: ${speed.toFixed(1)} km/h • Distance: ${distance.toFixed(2)} km`,
+        {
           progress: {
             max: 50,
             current: Math.min(speed, 50),
@@ -622,15 +671,11 @@ class ForegroundService {
             type: 1, // BigTextStyle
             text: `Speed: ${speed.toFixed(1)} km/h\nDistance: ${distance.toFixed(2)} km\nConnection: ${BluetoothService.isConnected ? 'Connected' : 'Disconnected'}`,
           },
-        };
-      } else if (Platform.OS === 'ios') {
-        notification.ios = {
-          categoryId: 'iconsole-tracker',
-        };
-      }
+          connectionStatus
+        }
+      );
       
       await notifee.displayNotification(notification);
-      
       console.log(`📱 Notification updated: ${speed.toFixed(1)} km/h, ${distance.toFixed(2)} km`);
     } catch (error) {
       // Only log foreground service errors once to avoid spam
@@ -699,6 +744,9 @@ class ForegroundService {
       clearInterval(this.updateInterval);
       this.updateInterval = null;
     }
+
+    // Stop notification watchdog
+    this.stopNotificationWatchdog();
 
     // Stop reconnection process
     this.stopReconnectionProcess();
