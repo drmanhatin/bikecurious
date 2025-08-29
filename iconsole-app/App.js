@@ -11,7 +11,6 @@ import { LinearGradient } from 'expo-linear-gradient';
 import { LineChart, BarChart } from 'react-native-gifted-charts';
 import { Dimensions, ScrollView } from 'react-native';
 import BluetoothService from './services/BluetoothService';
-import BackgroundService from './services/BackgroundService';
 import ForegroundService from './services/ForegroundService';
 
 // Custom theme colors

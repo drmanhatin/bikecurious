@@ -1,644 +1,437 @@
-import { BleManager, Device, Characteristic } from 'react-native-ble-plx';
-import AsyncStorage from '@react-native-async-storage/async-storage';
-import { Buffer } from 'buffer';
+import { BleManager } from 'react-native-ble-plx';
 import { Platform, PermissionsAndroid } from 'react-native';
 
 class BluetoothService {
   constructor() {
+    // Singleton pattern - prevent multiple instances
+    if (BluetoothService.instance) {
+      return BluetoothService.instance;
+    }
+    
     this.manager = null;
     this.device = null;
     this.isConnected = false;
     this.isScanning = false;
-    this.isInitialized = false;
-    
-    // Data tracking
-    this.currentSpeed = 0.0;
-    this.totalDistance = 0.0;
-    this.speedDatapoints = [];
-    this.lastDataTime = Date.now();
-    this.lastWheelRevs = null;
-    this.lastWheelTime = null;
+    this.isConnecting = false; // Prevent concurrent connection attempts
+    this.isStartConnectingActive = false; // Prevent multiple startConnecting calls
+    this.connectionAttemptInterval = null;
     
     // Callbacks
+    this.onConnectionChange = null;
     this.onSpeedUpdate = null;
     this.onDistanceUpdate = null;
-    this.onConnectionChange = null;
+    
+    // Data
+    this.currentSpeed = 0;
+    this.totalDistance = 0;
+    
+    // Store singleton instance
+    BluetoothService.instance = this;
   }
 
   async initialize() {
-    if (this.isInitialized) {
-      console.log('BluetoothService already initialized');
-      return;
-    }
-
-    console.log('Initializing BluetoothService...');
+    console.log('🔧 Initializing BluetoothService...');
     this.manager = new BleManager();
-    
-    // Load saved distance
-    await this.loadTotalDistance();
-    
-    // Start update worker
-    this.startUpdateWorker();
-    
-    this.isInitialized = true;
-    console.log('BluetoothService initialized');
+    console.log('✅ BluetoothService initialized');
   }
 
-  async loadTotalDistance() {
-    try {
-      const saved = await AsyncStorage.getItem('totalDistance');
-      if (saved) {
-        this.totalDistance = parseFloat(saved);
-        console.log(`Loaded total distance: ${this.totalDistance.toFixed(3)} km`);
-      }
-    } catch (error) {
-      console.warn('Could not load total distance:', error);
-    }
-  }
-
-  async saveTotalDistance() {
-    try {
-      await AsyncStorage.setItem('totalDistance', this.totalDistance.toString());
-    } catch (error) {
-      console.error('Could not save total distance:', error);
-    }
-  }
-
-  startUpdateWorker() {
-    // Update every second
-    this.updateInterval = setInterval(() => {
-      const currentTime = Date.now();
+  async requestPermissions() {
+    if (Platform.OS === 'android') {
+      const permissions = [
+        PermissionsAndroid.PERMISSIONS.ACCESS_FINE_LOCATION,
+        PermissionsAndroid.PERMISSIONS.BLUETOOTH_SCAN,
+        PermissionsAndroid.PERMISSIONS.BLUETOOTH_CONNECT,
+      ];
       
-      // Process speed datapoints
-      if (this.speedDatapoints.length > 0) {
-        const oldSpeed = this.currentSpeed;
-        this.currentSpeed = this.speedDatapoints.reduce((sum, speed) => sum + speed, 0) / this.speedDatapoints.length;
-        this.speedDatapoints = [];
-        console.log(`Speed updated: ${oldSpeed.toFixed(1)} -> ${this.currentSpeed.toFixed(1)} km/h`);
-      } else {
-        // Decay speed if no recent data
-        const timeSinceData = (currentTime - this.lastDataTime) / 1000;
-        if (timeSinceData > 1.0) {
-          const oldSpeed = this.currentSpeed;
-          const decayFactor = Math.pow(0.67, Math.floor(timeSinceData));
-          this.currentSpeed *= decayFactor;
-          if (this.currentSpeed < 0.1) {
-            this.currentSpeed = 0.0;
-          }
-        }
-      }
-      
-      // Add distance based on current speed
-      if (this.currentSpeed > 0) {
-        const distanceIncrement = this.currentSpeed / 3600.0; // km per second
-        this.totalDistance += distanceIncrement;
-        this.saveTotalDistance();
-      }
-      
-      // Notify callbacks
-      if (this.onSpeedUpdate) {
-        this.onSpeedUpdate(this.currentSpeed);
-      }
-      if (this.onDistanceUpdate) {
-        this.onDistanceUpdate(this.totalDistance);
-      }
-    }, 1000);
-  }
-
-  // Add test method to simulate data for testing notifications
-  startTestData() {
-    console.log('🧪 Starting test data simulation...');
-    let testSpeed = 0;
-    
-    setInterval(() => {
-      // Simulate varying speed data
-      testSpeed = 15 + Math.sin(Date.now() / 10000) * 10; // Speed between 5-25 km/h
-      this.addSpeedDatapoint(testSpeed);
-      console.log(`🧪 Test data: ${testSpeed.toFixed(1)} km/h`);
-    }, 2000);
-  }
-
-  stopUpdateWorker() {
-    if (this.updateInterval) {
-      clearInterval(this.updateInterval);
-      this.updateInterval = null;
+      const granted = await PermissionsAndroid.requestMultiple(permissions);
+      console.log('📱 Android permissions:', granted);
     }
-  }
 
-  addSpeedDatapoint(speed) {
-    // Discard unrealistic speeds over 50 km/h
-    if (speed > 50.0) {
-      console.warn(`Discarding unrealistic speed: ${speed.toFixed(1)} km/h`);
-      return;
+    const state = await this.manager.state();
+    if (state !== 'PoweredOn') {
+      throw new Error(`Bluetooth is ${state}. Please enable Bluetooth.`);
     }
     
-    this.speedDatapoints.push(speed);
-    this.lastDataTime = Date.now();
-    console.log(`Speed datapoint: ${speed.toFixed(1)} km/h`);
+    console.log('✅ Bluetooth permissions OK');
   }
 
-  async requestBluetoothPermissions() {
-    try {
-      console.log('🔵 Requesting Bluetooth permissions...');
-      
-      if (!this.manager) {
-        console.log('BleManager not initialized, reinitializing...');
-        this.manager = new BleManager();
-      }
-
-      // Request Android permissions
-      if (Platform.OS === 'android') {
-        console.log('📱 Requesting Android permissions...');
-        try {
-          const permissions = [
-            PermissionsAndroid.PERMISSIONS.ACCESS_FINE_LOCATION,
-            PermissionsAndroid.PERMISSIONS.BLUETOOTH_SCAN,
-            PermissionsAndroid.PERMISSIONS.BLUETOOTH_CONNECT,
-          ];
-          
-          console.log('Requesting permissions:', permissions);
-          
-          const granted = await PermissionsAndroid.requestMultiple(permissions);
-          
-          console.log('✅ Android permissions result:', granted);
-          
-          // Check if all permissions were granted
-          const allGranted = Object.values(granted).every(
-            permission => permission === PermissionsAndroid.RESULTS.GRANTED
-          );
-          
-          if (!allGranted) {
-            console.warn('⚠️ Not all permissions granted:', granted);
-          } else {
-            console.log('✅ All Android permissions granted!');
-          }
-        } catch (err) {
-          console.error('❌ Android permission request failed:', err);
-        }
-      }
-      
-      console.log('🔍 Checking Bluetooth state...');
-      const state = await this.manager.state();
-      console.log('📡 Bluetooth state:', state);
-      
-      if (state !== 'PoweredOn') {
-        throw new Error(`Bluetooth is ${state}. Please enable Bluetooth and try again.`);
-      }
-      
-      console.log('✅ Bluetooth permissions and state OK!');
-      return true;
-    } catch (error) {
-      console.error('❌ Bluetooth permission error:', error);
-      throw error;
-    }
-  }
-
-  async scanForDevices() {
-    const scanStartTime = Date.now();
-    console.log(`🔍 [SCAN] Starting device scan at ${new Date().toISOString()}`);
-    
+  async findIConsoleDevice() {
+    // Prevent concurrent scans
     if (this.isScanning) {
-      console.log('⚠️ [SCAN] Already scanning - returning empty array');
-      return [];
+      console.log('⚠️ [SCAN] Scan already in progress, waiting for completion...');
+      throw new Error('Scan already in progress');
     }
-
-    if (!this.manager) {
-      console.log('🔧 [SCAN] BleManager not initialized, reinitializing...');
-      this.manager = new BleManager();
-    }
-
-    // Request permissions first
-    console.log('🔐 [SCAN] Requesting Bluetooth permissions...');
-    await this.requestBluetoothPermissions();
-    console.log('✅ [SCAN] Bluetooth permissions granted');
-
-    console.log('📡 [SCAN] Starting BLE device scan...');
-    console.log('🎯 [SCAN] Scanning for ALL devices (will filter for fitness/cycling devices)');
-    this.isScanning = true;
-    
-    let deviceCount = 0;
-    const foundDevices = new Map(); // Use Map to store unique devices by ID
-    const devicesByName = new Map(); // Track devices by name for debugging
     
     return new Promise((resolve, reject) => {
+      const scanStartTime = Date.now();
+      console.log('🔍 [SCAN] Starting scan for iConsole device...');
+      
+      // Set scanning flag immediately
+      this.isScanning = true;
+      
+      let deviceCount = 0;
+      
+      // Helper function to cleanup scan state
+      const cleanupScan = () => {
+        try {
+          this.manager.stopDeviceScan();
+        } catch (error) {
+          console.warn('⚠️ [SCAN] Error stopping scan:', error.message);
+        }
+        this.isScanning = false;
+      };
+
       const timeout = setTimeout(() => {
         const scanDuration = Date.now() - scanStartTime;
-        console.log(`⏰ [SCAN] Scan timeout after 15 seconds (actual: ${scanDuration}ms)`);
-        console.log(`📊 [SCAN] Scan summary: Found ${deviceCount} total devices in ${scanDuration}ms`);
+        console.log(`⏰ [SCAN] Scan timeout after ${scanDuration}ms`);
+        console.log(`📊 [SCAN] Found ${deviceCount} total devices, no iConsole devices detected`);
         
-        // Log device breakdown by name
-        const deviceNames = Array.from(foundDevices.values()).map(d => d.name || 'Unknown');
-        const namedDevices = deviceNames.filter(name => name !== 'Unknown');
-        const unknownDevices = deviceNames.filter(name => name === 'Unknown');
-        
-        console.log(`📱 [SCAN] Named devices (${namedDevices.length}):`, namedDevices);
-        console.log(`❓ [SCAN] Unknown devices: ${unknownDevices.length}`);
-        
-        // Log device name frequency
-        const nameFrequency = {};
-        deviceNames.forEach(name => {
-          nameFrequency[name] = (nameFrequency[name] || 0) + 1;
-        });
-        console.log(`📈 [SCAN] Device name frequency:`, nameFrequency);
-        
-        this.manager.stopDeviceScan();
-        this.isScanning = false;
-        
-        // Return all found devices that could be fitness/bike related
-        const potentialDevices = Array.from(foundDevices.values()).filter(device => {
-          const deviceName = (device.name || '').toLowerCase();
-          const isRelevant = deviceName.includes('iconsole') || 
-                 deviceName.includes('i-console') || 
-                 deviceName.includes('console') ||
-                 deviceName.includes('bike') ||
-                 deviceName.includes('fitness') ||
-                 deviceName.includes('exercise') ||
-                 deviceName.includes('cycling') ||
-                 deviceName.includes('trainer') ||
-                 deviceName.includes('wahoo') ||
-                 deviceName.includes('tacx') ||
-                 deviceName.includes('elite') ||
-                 deviceName.includes('zwift') ||
-                 (device.name && device.name.length > 0); // Include any named device as potential option
-          
-          if (isRelevant) {
-            console.log(`✅ [SCAN] Including device: "${device.displayName}" (${device.id}) RSSI: ${device.rssi}`);
-          }
-          
-          return isRelevant;
-        });
-        
-        console.log(`🎯 [SCAN] Filtered to ${potentialDevices.length} relevant devices from ${deviceCount} total`);
-        console.log(`⏱️ [SCAN] Scan completed in ${scanDuration}ms`);
-        
-        resolve(potentialDevices);
-      }, 15000);
+        cleanupScan();
+        reject(new Error(`No iConsole device found after scanning ${deviceCount} devices in ${scanDuration}ms`));
+      }, 15000); // 15 second timeout
 
       this.manager.startDeviceScan(null, null, (error, device) => {
         if (error) {
-          const scanDuration = Date.now() - scanStartTime;
-          console.error(`❌ [SCAN] Scan error after ${scanDuration}ms:`, error);
+          console.error('❌ [SCAN] Scan error:', error.message);
           clearTimeout(timeout);
-          this.isScanning = false;
+          cleanupScan();
           reject(error);
           return;
         }
 
-        if (device && device.id && !foundDevices.has(device.id)) {
+        if (device && device.id) {
           deviceCount++;
-          const deviceName = device.name || 'Unknown Device';
-          const deviceId = device.id || 'No ID';
-          const rssi = device.rssi || 'N/A';
           
-          // Store device with additional info for dropdown
-          const deviceInfo = {
-            ...device,
-            displayName: deviceName !== 'Unknown Device' ? deviceName : `Device ${deviceId.slice(-4)}`,
-            rssi: device.rssi
-          };
-          foundDevices.set(device.id, deviceInfo);
-          
-          // Track by name for frequency analysis
-          const nameKey = deviceName || 'Unknown';
-          if (!devicesByName.has(nameKey)) {
-            devicesByName.set(nameKey, []);
-          }
-          devicesByName.get(nameKey).push(deviceInfo);
-          
-          // Enhanced device logging
-          const timeSinceScanStart = Date.now() - scanStartTime;
-          console.log(`📱 [SCAN] Device ${deviceCount} (${timeSinceScanStart}ms): "${deviceName}" (${deviceId.slice(-8)}) RSSI: ${rssi}dBm`);
-          
-          // Log additional device properties if available
-          if (device.serviceUUIDs && device.serviceUUIDs.length > 0) {
-            console.log(`   🔧 [SCAN] Services: ${device.serviceUUIDs.slice(0, 3).join(', ')}${device.serviceUUIDs.length > 3 ? '...' : ''}`);
-          }
-          
-          if (device.manufacturerData) {
-            console.log(`   🏭 [SCAN] Manufacturer data: ${device.manufacturerData.slice(0, 20)}${device.manufacturerData.length > 20 ? '...' : ''}`);
-          }
-          
-          // Highlight potential iConsole devices
-          const nameToCheck = deviceName.toLowerCase();
-          if (nameToCheck.includes('iconsole') || nameToCheck.includes('console')) {
-            console.log(`   🎯 [SCAN] *** POTENTIAL iCONSOLE DEVICE FOUND! ***`);
-          } else if (nameToCheck.includes('bike') || nameToCheck.includes('fitness') || nameToCheck.includes('cycling')) {
-            console.log(`   🚴 [SCAN] *** FITNESS/CYCLING DEVICE DETECTED ***`);
-          }
-          
-          // Log scan progress every 10 devices
+          // Log every 10th device to show progress
           if (deviceCount % 10 === 0) {
             const elapsed = Date.now() - scanStartTime;
-            const rate = (deviceCount / elapsed * 1000).toFixed(1);
-            console.log(`📊 [SCAN] Progress: ${deviceCount} devices in ${elapsed}ms (${rate} devices/sec)`);
+            console.log(`📱 [SCAN] Progress: ${deviceCount} devices scanned in ${elapsed}ms`);
           }
-        } else if (device && foundDevices.has(device.id)) {
-          // Log duplicate device encounters
-          const existingDevice = foundDevices.get(device.id);
-          const rssiDiff = device.rssi - existingDevice.rssi;
-          if (Math.abs(rssiDiff) > 5) { // Only log significant RSSI changes
-            console.log(`🔄 [SCAN] Duplicate "${device.name || 'Unknown'}" - RSSI changed by ${rssiDiff > 0 ? '+' : ''}${rssiDiff}dBm`);
+          
+          if (device.name) {
+            const deviceName = device.name.toLowerCase();
+            if (deviceName.includes('iconsole') || deviceName.includes('console')) {
+              const scanDuration = Date.now() - scanStartTime;
+              console.log(`🎯 [SCAN] Found iConsole device: ${device.name} (${device.id}) RSSI: ${device.rssi}dBm`);
+              console.log(`🛑 [SCAN] Stopping scan after ${scanDuration}ms to connect immediately!`);
+              
+              // Stop scanning immediately when any iConsole device is found
+              clearTimeout(timeout);
+              cleanupScan();
+              resolve(device);
+              return;
+            } else {
+              // Log other interesting devices
+              if (deviceName.includes('bike') || deviceName.includes('fitness') || deviceName.includes('cycling')) {
+                console.log(`🚴 [SCAN] Found fitness device: ${device.name} (${device.rssi}dBm)`);
+              }
+            }
           }
         }
       });
     });
   }
 
-  // New method to scan and return first iConsole device (for backward compatibility)
-  async scanForFirstIConsoleDevice() {
-    const devices = await this.scanForDevices();
-    
-    // Look for iConsole devices first
-    const iConsoleDevice = devices.find(device => {
-      const nameToCheck = (device.name || '').toLowerCase();
-      return nameToCheck.includes('iconsole') || 
-             nameToCheck.includes('i-console') || 
-             nameToCheck.includes('console');
-    });
-    
-    if (iConsoleDevice) {
-      return iConsoleDevice;
-    }
-    
-    // If no iConsole found, return first fitness-related device
-    const fitnessDevice = devices.find(device => {
-      const nameToCheck = (device.name || '').toLowerCase();
-      return nameToCheck.includes('bike') ||
-             nameToCheck.includes('fitness') ||
-             nameToCheck.includes('exercise') ||
-             nameToCheck.includes('cycling') ||
-             nameToCheck.includes('trainer');
-    });
-    
-    if (fitnessDevice) {
-      return fitnessDevice;
-    }
-    
-    // If no specific devices found, throw error
-    if (devices.length === 0) {
-      throw new Error('No Bluetooth devices found. Make sure your iConsole device is powered on and in pairing mode.');
-    }
-    
-    throw new Error(`No iConsole device found. Found ${devices.length} devices: ${devices.map(d => d.displayName).join(', ')}`);
-  }
-
   async connectToDevice(device) {
+    // Prevent concurrent connection attempts
+    if (this.isConnecting) {
+      throw new Error('Connection already in progress');
+    }
+    
+    this.isConnecting = true;
+    const connectionStartTime = Date.now();
+    console.log(`🔗 [CONNECT] Starting connection to ${device.name} (${device.id})`);
+    console.log(`📊 [CONNECT] Device RSSI: ${device.rssi || 'unknown'} dBm`);
+    
+    // Stop any ongoing scans to prevent interference
+    if (this.isScanning) {
+      console.log('🛑 [CONNECT] Stopping scan to prevent interference...');
+      this.manager.stopDeviceScan();
+      this.isScanning = false;
+    }
+    
     try {
-      console.log(`Connecting to ${device.name}...`);
+      // Step 1: Connect to device with timeout
+      console.log('🔌 [CONNECT] Step 1: Establishing BLE connection...');
+      this.device = await this.withTimeout(
+        device.connect(),
+        15000, // 15 second timeout
+        'Device connection timed out'
+      );
       
-      this.device = await device.connect();
-      await this.device.discoverAllServicesAndCharacteristics();
+      const connectTime = Date.now() - connectionStartTime;
+      console.log(`✅ [CONNECT] Step 1 completed in ${connectTime}ms`);
       
+      // Step 1.5: Wait for device to stabilize after connection
+      console.log('⏳ [CONNECT] Waiting for device to stabilize...');
+      await new Promise(resolve => setTimeout(resolve, 4000)); // 4 second delay for better stability
+      
+      // Step 2: Discover services and characteristics with retry
+      console.log('🔍 [CONNECT] Step 2: Discovering services and characteristics...');
+      const discoveryStartTime = Date.now();
+      
+      await this.discoverServicesWithRetry();
+      
+      const discoveryTime = Date.now() - discoveryStartTime;
+      console.log(`✅ [CONNECT] Step 2 completed in ${discoveryTime}ms`);
+      
+      // Step 3: Set connection state
       this.isConnected = true;
-      console.log('Connected successfully!');
+      const totalTime = Date.now() - connectionStartTime;
+      console.log(`🎉 [CONNECT] Successfully connected to iConsole in ${totalTime}ms!`);
       
       if (this.onConnectionChange) {
         this.onConnectionChange(true);
       }
       
-      // Start listening for data
-      await this.subscribeToCharacteristics();
+      // Step 3.5: Wait before starting data monitoring
+      console.log('⏳ [CONNECT] Waiting before starting data monitoring...');
+      await new Promise(resolve => setTimeout(resolve, 2000)); // 2 second delay before notifications
       
-      return true;
+      // Step 4: Start monitoring for data
+      console.log('📡 [CONNECT] Step 4: Starting data monitoring...');
+      await this.startMonitoring();
+      
+      console.log('🏁 [CONNECT] Connection process completed successfully');
+      
     } catch (error) {
-      console.error('Connection error:', error);
+      const totalTime = Date.now() - connectionStartTime;
+      console.error(`❌ [CONNECT] Connection failed after ${totalTime}ms:`, error.message);
+      
+      // Cleanup on failure
+      if (this.device) {
+        try {
+          console.log('🧹 [CONNECT] Cleaning up failed connection...');
+          await this.device.cancelConnection();
+        } catch (cleanupError) {
+          console.warn('⚠️ [CONNECT] Cleanup failed:', cleanupError.message);
+        }
+        this.device = null;
+      }
+      
       this.isConnected = false;
       if (this.onConnectionChange) {
         this.onConnectionChange(false);
       }
+      
+      // Provide specific error context
+      if (error.message.includes('timeout')) {
+        console.error('💡 [CONNECT] Suggestion: Device may be out of range or busy');
+      } else if (error.message.includes('disconnected')) {
+        console.error('💡 [CONNECT] Suggestion: Device disconnected during connection');
+      }
+      
+      throw error;
+    } finally {
+      // Always clear the connecting flag
+      this.isConnecting = false;
+    }
+  }
+
+  // Helper method for adding timeouts to promises
+  async withTimeout(promise, timeoutMs, timeoutMessage) {
+    return new Promise((resolve, reject) => {
+      const timeout = setTimeout(() => {
+        reject(new Error(timeoutMessage));
+      }, timeoutMs);
+      
+      promise
+        .then(result => {
+          clearTimeout(timeout);
+          resolve(result);
+        })
+        .catch(error => {
+          clearTimeout(timeout);
+          reject(error);
+        });
+    });
+  }
+
+  // Service discovery with retry logic
+  async discoverServicesWithRetry(maxAttempts = 3) {
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+      try {
+        console.log(`🔍 [DISCOVERY] Attempt ${attempt}/${maxAttempts}...`);
+        
+        // Check if device is still connected
+        if (!this.device) {
+          throw new Error('Device lost during service discovery');
+        }
+        
+        // Verify connection status
+        const isConnected = await this.device.isConnected();
+        if (!isConnected) {
+          throw new Error('Device disconnected during service discovery');
+        }
+        
+        await this.withTimeout(
+          this.device.discoverAllServicesAndCharacteristics(),
+          30000, // 30 second timeout
+          'Service discovery timed out'
+        );
+        
+        console.log(`✅ [DISCOVERY] Success on attempt ${attempt}`);
+        return; // Success, exit retry loop
+        
+      } catch (error) {
+        console.error(`❌ [DISCOVERY] Attempt ${attempt} failed: ${error.message}`);
+        
+        if (attempt === maxAttempts) {
+          throw error; // Final attempt failed, throw error
+        }
+        
+        // Wait before retry with exponential backoff
+        const delay = attempt * 2000; // 2s, 4s, 6s...
+        console.log(`⏳ [DISCOVERY] Waiting ${delay}ms before retry...`);
+        await new Promise(resolve => setTimeout(resolve, delay));
+      }
+    }
+  }
+
+  async startMonitoring() {
+    if (!this.device) {
+      console.error('❌ [MONITOR] No device available for monitoring');
+      return;
+    }
+    
+    // Verify device is still connected before starting monitoring
+    const isConnected = await this.device.isConnected();
+    if (!isConnected) {
+      console.error('❌ [MONITOR] Device disconnected before monitoring could start');
+      return;
+    }
+    
+    console.log('📡 [MONITOR] Starting data monitoring...');
+    let subscribedCount = 0;
+    
+    try {
+      const services = await this.device.services();
+      console.log(`📋 [MONITOR] Found ${services.length} services`);
+      
+      for (const service of services) {
+        console.log(`🔧 [MONITOR] Service: ${service.uuid}`);
+        
+        try {
+          const characteristics = await service.characteristics();
+          
+          for (const char of characteristics) {
+            const props = [];
+            if (char.isNotifiable) props.push('notify');
+            if (char.isIndicatable) props.push('indicate');
+            
+            console.log(`  📊 [MONITOR] Characteristic: ${char.uuid} - Properties: ${props.join(', ')}`);
+            
+            if (char.isNotifiable || char.isIndicatable) {
+              // Check connection before each subscription attempt
+              if (!(await this.device.isConnected())) {
+                console.warn('⚠️ [MONITOR] Device disconnected during characteristic setup');
+                break;
+              }
+              
+              try {
+                await char.monitor((error, characteristic) => {
+                  if (error) {
+                    this.handleMonitorError(char.uuid, error);
+                    return;
+                  }
+                  
+                  if (characteristic && characteristic.value) {
+                    this.handleData(characteristic.uuid, characteristic.value);
+                  }
+                });
+                
+                console.log(`  ✅ [MONITOR] Successfully monitoring ${char.uuid}`);
+                subscribedCount++;
+                
+                // Small delay between subscriptions to prevent overwhelming the device
+                await new Promise(resolve => setTimeout(resolve, 100));
+                
+              } catch (error) {
+                this.handleSubscriptionError(char.uuid, error);
+              }
+            }
+          }
+        } catch (error) {
+          console.warn(`⚠️ [MONITOR] Could not get characteristics for service ${service.uuid}:`, error.message);
+        }
+      }
+      
+      if (subscribedCount === 0) {
+        console.error('❌ [MONITOR] No characteristics could be subscribed to!');
+        throw new Error('Failed to subscribe to any characteristics');
+      } else {
+        console.log(`✅ [MONITOR] Successfully subscribed to ${subscribedCount} characteristics`);
+      }
+      
+    } catch (error) {
+      console.error('❌ [MONITOR] Failed to start monitoring:', error.message);
       throw error;
     }
   }
 
-  async subscribeToCharacteristics() {
-    if (!this.device) {
-      console.error('No device connected');
+  handleMonitorError(characteristicUuid, error) {
+    const uuid = characteristicUuid.toLowerCase();
+    
+    // Handle specific error types
+    if (error.message && error.message.includes('was disconnected')) {
+      console.error(`🔌 [MONITOR] Device disconnected while monitoring ${characteristicUuid}`);
+      // Device disconnected - this will trigger reconnection logic
+      this.isConnected = false;
+      if (this.onConnectionChange) {
+        this.onConnectionChange(false);
+      }
       return;
     }
-
-    console.log('Discovering and subscribing to characteristics...');
     
-    const services = await this.device.services();
-    let subscribedCount = 0;
-    
-    for (const service of services) {
-      console.log(`Service: ${service.uuid}`);
-      const characteristics = await service.characteristics();
-      
-      for (const char of characteristics) {
-        console.log(`  Characteristic: ${char.uuid} - Properties: ${char.isNotifiable ? 'notify' : ''} ${char.isIndicatable ? 'indicate' : ''}`);
-        
-        if (char.isNotifiable || char.isIndicatable) {
-          try {
-            await char.monitor((error, characteristic) => {
-              if (error) {
-                console.error(`Monitor error for ${char.uuid}:`, error);
-                return;
-              }
-              
-              if (characteristic && characteristic.value) {
-                this.handleCharacteristicData(characteristic.uuid, characteristic.value);
-              }
-            });
-            
-            console.log(`  -> Successfully subscribed to ${char.uuid}`);
-            subscribedCount++;
-          } catch (error) {
-            console.warn(`  -> Could not subscribe to ${char.uuid}:`, error.message);
-          }
-        }
-      }
+    if (error.message && error.message.includes('notify change failed')) {
+      console.warn(`⚠️ [MONITOR] Characteristic ${characteristicUuid} does not support notifications - ignoring`);
+      return; // This is expected for some characteristics
     }
     
-    if (subscribedCount === 0) {
-      console.error('No characteristics could be subscribed to!');
+    // Log based on characteristic importance
+    if (uuid.includes('2a5b')) {
+      console.error('🚨 [CRITICAL] CSC Measurement characteristic failed - speed data unavailable!');
+      console.error('💡 [SUGGESTION] Move closer to device or check signal strength');
+    } else if (uuid.includes('fff1') || uuid.includes('ff09')) {
+      console.error('⚠️ [IMPORTANT] Custom iConsole characteristic failed - may affect functionality');
+    } else if (uuid.includes('2a05')) {
+      console.log('ℹ️ [INFO] Service Changed characteristic not supported - this is normal');
     } else {
-      console.log(`Successfully subscribed to ${subscribedCount} characteristics`);
+      console.warn(`⚠️ [MONITOR] Monitor error for ${characteristicUuid}:`, error.message);
     }
   }
 
-  handleCharacteristicData(uuid, base64Data) {
-    try {
-      // Convert base64 to buffer
-      const buffer = Buffer.from(base64Data, 'base64');
-      console.log(`Data from ${uuid.slice(-8)}: ${buffer.toString('hex')} (${buffer.length} bytes)`);
-      
-      const speed = this.extractSpeed(buffer, uuid);
-      if (speed !== null) {
-        this.addSpeedDatapoint(speed);
-      }
-    } catch (error) {
-      console.error(`Error handling data from ${uuid}:`, error);
-    }
-  }
-
-  extractSpeed(buffer, uuid) {
-    try {
-      // Standard Cycling Speed and Cadence Service (0x2A5B) - PRIMARY SOURCE
-      if (uuid.toLowerCase().includes('2a5b')) {
-        console.log(`🚴 Processing CSC Measurement data: ${buffer.toString('hex')} (${buffer.length} bytes)`);
-        
-        if (buffer.length < 1) {
-          console.warn('CSC buffer too short');
-          return null;
-        }
-        
-        const flags = buffer.readUInt8(0);
-        console.log(`CSC Flags: 0x${flags.toString(16).padStart(2, '0')} (${flags.toString(2).padStart(8, '0')})`);
-        
-        let offset = 1;
-        let speed = null;
-        
-        // Check if wheel revolution data is present (bit 0)
-        if (flags & 0x01) {
-          if (buffer.length < offset + 6) {
-            console.warn('CSC buffer too short for wheel data');
-            return null;
-          }
-          
-          const wheelRevs = buffer.readUInt32LE(offset);
-          const wheelTime = buffer.readUInt16LE(offset + 4);
-          offset += 6;
-          
-          console.log(`Wheel: revs=${wheelRevs}, time=${wheelTime} (1/1024s)`);
-          
-          if (this.lastWheelRevs !== null && this.lastWheelTime !== null) {
-            let revDiff = wheelRevs - this.lastWheelRevs;
-            let timeDiff = wheelTime - this.lastWheelTime;
-            
-            // Handle revolution counter rollover (32-bit)
-            if (revDiff < 0) {
-              revDiff += 4294967296; // 2^32
-            }
-            
-            // Handle time rollover (16-bit counter)
-            if (timeDiff < 0) {
-              timeDiff += 65536; // 2^16
-            }
-            
-            console.log(`Wheel diff: revs=${revDiff}, time=${timeDiff}`);
-            
-            if (timeDiff > 0 && revDiff > 0) {
-              // Time is in 1/1024 seconds
-              const timeSeconds = timeDiff / 1024.0;
-              
-              // Standard wheel circumference for road bike (700x25c) = 2.105m
-              // You can adjust this based on your actual wheel size
-              const wheelCircumferenceMeters = 2.105;
-              const distanceMeters = revDiff * wheelCircumferenceMeters;
-              const speedMs = distanceMeters / timeSeconds;
-              const speedKmh = speedMs * 3.6; // Convert m/s to km/h
-              
-              console.log(`📊 CSC Speed calculation: ${distanceMeters.toFixed(3)}m in ${timeSeconds.toFixed(3)}s = ${speedKmh.toFixed(1)} km/h`);
-              
-              speed = speedKmh;
-            }
-          } else {
-            console.log('🔄 First wheel data received, storing baseline');
-          }
-          
-          this.lastWheelRevs = wheelRevs;
-          this.lastWheelTime = wheelTime;
-        }
-        
-        // Check if crank revolution data is present (bit 1)
-        if (flags & 0x02) {
-          if (buffer.length < offset + 4) {
-            console.warn('CSC buffer too short for crank data');
-          } else {
-            const crankRevs = buffer.readUInt16LE(offset);
-            const crankTime = buffer.readUInt16LE(offset + 2);
-            console.log(`Crank: revs=${crankRevs}, time=${crankTime} (1/1024s)`);
-            // Could calculate cadence here if needed
-          }
-        }
-        
-        return speed;
-      }
-      
-      // Indoor Bike Data (0x2AD2) - SECONDARY SOURCE
-      else if (uuid.toLowerCase().includes('2ad2') && buffer.length >= 4) {
-        console.log(`🏋️ Processing Indoor Bike data: ${buffer.toString('hex')} (${buffer.length} bytes)`);
-        const flags = buffer.readUInt16LE(0);
-        console.log(`Indoor Bike Flags: 0x${flags.toString(16).padStart(4, '0')}`);
-        
-        if (flags & 0x01) { // Instantaneous speed present
-          const speed = buffer.readUInt16LE(2) / 100.0; // km/h (resolution 0.01)
-          console.log(`📊 Indoor Bike Speed: ${speed.toFixed(1)} km/h`);
-          return speed;
-        }
-      }
-      
-      // Custom characteristics - try to extract speed data
-      else if (uuid.toLowerCase().includes('fff1') || 
-               uuid.toLowerCase().includes('ff09') || 
-               uuid.toLowerCase().includes('ff02')) {
-        console.log(`🔧 Processing custom characteristic ${uuid.slice(-8)}: ${buffer.toString('hex')} (${buffer.length} bytes)`);
-        
-        // Try multiple parsing approaches for custom data
-        if (buffer.length >= 2) {
-          // Approach 1: 16-bit little endian with /100 scaling
-          try {
-            const speed1 = buffer.readUInt16LE(0) / 100.0;
-            if (speed1 >= 0 && speed1 <= 100) {
-              console.log(`📊 Custom speed (LE/100): ${speed1.toFixed(1)} km/h`);
-              return speed1;
-            }
-          } catch (error) {
-            // Continue to next approach
-          }
-          
-          // Approach 2: 16-bit big endian with /100 scaling
-          try {
-            const speed2 = buffer.readUInt16BE(0) / 100.0;
-            if (speed2 >= 0 && speed2 <= 100) {
-              console.log(`📊 Custom speed (BE/100): ${speed2.toFixed(1)} km/h`);
-              return speed2;
-            }
-          } catch (error) {
-            // Continue to next approach
-          }
-          
-          // Approach 3: Single byte scaling
-          try {
-            const speed3 = buffer.readUInt8(0);
-            if (speed3 >= 0 && speed3 <= 100) {
-              console.log(`📊 Custom speed (byte): ${speed3.toFixed(1)} km/h`);
-              return speed3;
-            }
-          } catch (error) {
-            // Continue to next approach
-          }
-        }
-        
-        console.log(`⚠️ Could not extract speed from custom characteristic ${uuid.slice(-8)}`);
-      }
-      
-      // Generic speed extraction for other unknown characteristics
-      else if (buffer.length >= 2) {
-        console.log(`🔍 Generic parsing for ${uuid.slice(-8)}: ${buffer.toString('hex')} (${buffer.length} bytes)`);
-        try {
-          const speed = buffer.readUInt16LE(0) / 100.0;
-          if (speed >= 0 && speed <= 100) { // Reasonable speed range
-            console.log(`📊 Generic speed: ${speed.toFixed(1)} km/h`);
-            return speed;
-          }
-        } catch (error) {
-          // Ignore parsing errors for generic extraction
-        }
-      }
-    } catch (error) {
-      console.error(`❌ Error extracting speed from ${uuid}:`, error);
-    }
+  handleSubscriptionError(characteristicUuid, error) {
+    const uuid = characteristicUuid.toLowerCase();
     
-    return null;
+    if (uuid.includes('2a5b')) {
+      console.warn('🚨 [CRITICAL] Failed to subscribe to CSC Measurement - speed tracking will not work!');
+      console.warn('💡 [SOLUTION] Improve signal strength by moving closer to device');
+    } else if (uuid.includes('2a05')) {
+      console.log('ℹ️ [INFO] Service Changed characteristic subscription failed - this is normal');
+    } else {
+      console.warn(`⚠️ [MONITOR] Could not subscribe to ${characteristicUuid}:`, error.message);
+    }
+  }
+
+  handleData(uuid, base64Data) {
+    // Simple data handling - you can expand this later
+    console.log(`📊 Data from ${uuid.slice(-8)}: ${base64Data}`);
+    
+    // For now, just trigger callbacks with dummy data
+    if (this.onSpeedUpdate) {
+      this.onSpeedUpdate(this.currentSpeed);
+    }
+    if (this.onDistanceUpdate) {
+      this.onDistanceUpdate(this.totalDistance);
+    }
   }
 
   async disconnect() {
     if (this.device && this.isConnected) {
       try {
         await this.device.cancelConnection();
-        console.log('Disconnected from device');
+        console.log('🔌 Disconnected from device');
       } catch (error) {
         console.error('Disconnect error:', error);
       }
@@ -652,85 +445,135 @@ class BluetoothService {
     }
   }
 
-  async findAndConnect() {
-    try {
-      // Ensure manager is available before attempting connection
-      if (!this.manager) {
-        console.log('BleManager not available, reinitializing...');
-        await this.initialize();
-      }
-      
-      const device = await this.scanForFirstIConsoleDevice();
-      await this.connectToDevice(device);
-      return true;
-    } catch (error) {
-      console.error('Find and connect error:', error);
-      
-      // If the error is about destroyed manager, try to reinitialize once
-      if (error.message && error.message.includes('BleManager was destroyed')) {
-        console.log('BleManager was destroyed, attempting to reinitialize...');
-        try {
-          await this.initialize();
-          const device = await this.scanForFirstIConsoleDevice();
-          await this.connectToDevice(device);
-          return true;
-        } catch (retryError) {
-          console.error('Retry after reinitialization failed:', retryError);
-          throw retryError;
-        }
-      }
-      
-      throw error;
+  // Main method: keeps trying to connect until successful
+  async startConnecting() {
+    // Prevent multiple startConnecting calls
+    if (this.isStartConnectingActive) {
+      console.log('⚠️ [MAIN] startConnecting already active, ignoring duplicate call');
+      return;
     }
+    
+    this.isStartConnectingActive = true;
+    console.log('🚀 [MAIN] Starting iConsole connection process...');
+    
+    // Stop any existing attempts
+    this.stopConnecting();
+    
+    // Initialize if needed
+    if (!this.manager) {
+      await this.initialize();
+    }
+    
+    // Request permissions
+    await this.requestPermissions();
+    
+    let attemptCount = 0;
+    let retryDelay = 3000; // Start with 3 seconds
+    const maxRetryDelay = 30000; // Max 30 seconds between attempts
+    
+    // Start connection attempts with exponential backoff
+    const attemptConnection = async () => {
+      if (this.isConnected) {
+        console.log('✅ [MAIN] Already connected, stopping attempts');
+        return;
+      }
+      
+      if (this.isScanning) {
+        console.log('⏳ [MAIN] Scan in progress, skipping attempt');
+        this.scheduleNextAttempt();
+        return;
+      }
+      
+      if (this.isConnecting) {
+        console.log('🔗 [MAIN] Connection in progress, skipping attempt');
+        this.scheduleNextAttempt();
+        return;
+      }
+      
+      attemptCount++;
+      console.log(`🔄 [MAIN] Connection attempt #${attemptCount} (retry delay: ${retryDelay/1000}s)`);
+      
+      try {
+        const device = await this.findIConsoleDevice();
+        await this.connectToDevice(device);
+        
+        // If we get here, connection was successful
+        console.log('🎉 [MAIN] Successfully connected! Stopping connection attempts.');
+        this.stopConnecting();
+        
+        // Reset retry delay for future disconnections
+        retryDelay = 3000;
+        attemptCount = 0;
+        
+        // Clear the active flag
+        this.isStartConnectingActive = false;
+        
+      } catch (error) {
+        console.log(`⚠️ [MAIN] Attempt #${attemptCount} failed: ${error.message}`);
+        
+        // Handle specific error types
+        if (error.message.includes('Scan already in progress') || 
+            error.message.includes('Connection already in progress')) {
+          console.log('🔄 [MAIN] Concurrent operation detected, retrying sooner...');
+          // Use shorter delay for concurrent operation conflicts
+          this.connectionAttemptInterval = setTimeout(attemptConnection, 1000);
+          return;
+        }
+        
+        // Increase retry delay with exponential backoff for other errors
+        retryDelay = Math.min(retryDelay * 1.5, maxRetryDelay);
+        console.log(`⏰ [MAIN] Next attempt in ${retryDelay/1000}s...`);
+        
+        this.scheduleNextAttempt();
+      }
+    };
+    
+    const scheduleNextAttempt = () => {
+      this.connectionAttemptInterval = setTimeout(attemptConnection, retryDelay);
+    };
+    
+    this.scheduleNextAttempt = scheduleNextAttempt;
+    
+    // Try immediately first
+    attemptConnection();
   }
 
-  // New method to connect to a specific device by ID
-  async connectToDeviceById(deviceId) {
-    try {
-      if (!this.manager) {
-        console.log('BleManager not available, reinitializing...');
-        await this.initialize();
-      }
-      
-      console.log(`Connecting to device with ID: ${deviceId}`);
-      const device = await this.manager.connectToDevice(deviceId);
-      await device.discoverAllServicesAndCharacteristics();
-      
-      this.device = device;
-      this.isConnected = true;
-      console.log('Connected successfully!');
-      
-      if (this.onConnectionChange) {
-        this.onConnectionChange(true);
-      }
-      
-      // Start listening for data
-      await this.subscribeToCharacteristics();
-      
-      return true;
-    } catch (error) {
-      console.error('Connection error:', error);
-      this.isConnected = false;
-      if (this.onConnectionChange) {
-        this.onConnectionChange(false);
-      }
-      throw error;
+  stopConnecting() {
+    if (this.connectionAttemptInterval) {
+      clearTimeout(this.connectionAttemptInterval);
+      this.connectionAttemptInterval = null;
+      console.log('⏹️ [MAIN] Stopped connection attempts');
     }
+    
+    if (this.isScanning) {
+      console.log('🛑 [MAIN] Stopping active scan...');
+      try {
+        this.manager.stopDeviceScan();
+      } catch (error) {
+        console.warn('⚠️ [MAIN] Error stopping scan:', error.message);
+      }
+      this.isScanning = false;
+    }
+    
+    // Also clear connecting flag if set
+    if (this.isConnecting) {
+      console.log('🛑 [MAIN] Clearing connection flag...');
+      this.isConnecting = false;
+    }
+    
+    // Clear the startConnecting active flag
+    this.isStartConnectingActive = false;
   }
 
   destroy() {
-    console.log('Destroying BluetoothService...');
-    this.stopUpdateWorker();
+    console.log('🧹 Destroying BluetoothService...');
+    this.stopConnecting();
     this.disconnect();
+    
     if (this.manager) {
-      try {
-        this.manager.destroy();
-      } catch (error) {
-        console.warn('Error destroying BleManager:', error);
-      }
+      this.manager.destroy();
       this.manager = null;
     }
-    this.isInitialized = false;
   }
 }
 
