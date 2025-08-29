@@ -5,7 +5,7 @@ import { StyleSheet, View, Alert, AppState, Platform } from 'react-native';
 import * as NavigationBar from 'expo-navigation-bar';
 import { useFonts, Merriweather_400Regular, Merriweather_700Bold } from '@expo-google-fonts/merriweather';
 import { Provider as PaperProvider, MD3DarkTheme, BottomNavigation } from 'react-native-paper';
-import { Text, Button, Card, Title, Paragraph, ActivityIndicator, Chip, Surface, Divider, IconButton, FAB, Appbar, Badge } from 'react-native-paper';
+import { Text, Button, Card, Title, Paragraph, ActivityIndicator, Chip, Surface, Divider, IconButton, FAB, Appbar, Badge, Menu } from 'react-native-paper';
 import { SafeAreaProvider, SafeAreaView } from 'react-native-safe-area-context';
 import { LinearGradient } from 'expo-linear-gradient';
 import { LineChart, BarChart } from 'react-native-gifted-charts';
@@ -132,6 +132,10 @@ export default function App() {
   const [currentSpeed, setCurrentSpeed] = useState(0);
   const [totalDistance, setTotalDistance] = useState(0);
   const [showBatteryButton, setShowBatteryButton] = useState(false);
+  const [availableDevices, setAvailableDevices] = useState([]);
+  const [selectedDevice, setSelectedDevice] = useState(null);
+  const [isScanning, setIsScanning] = useState(false);
+  const [deviceMenuVisible, setDeviceMenuVisible] = useState(false);
   const [speedHistory, setSpeedHistory] = useState([]);
   const [distanceHistory, setDistanceHistory] = useState([]);
   const [timeLabels, setTimeLabels] = useState([]);
@@ -164,6 +168,11 @@ export default function App() {
         console.log('App has come to the foreground');
         // Refresh data when app comes to foreground
         refreshData();
+        // Update available devices from foreground service
+        const devices = ForegroundService.getAvailableDevices();
+        if (devices.length > 0) {
+          setAvailableDevices(devices);
+        }
       }
       appState.current = nextAppState;
     };
@@ -172,7 +181,9 @@ export default function App() {
 
     return () => {
       subscription?.remove();
-      cleanup();
+      // Only cleanup when the app is actually being terminated, not during normal React lifecycle
+      // This prevents the BleManager from being destroyed during development hot reloads
+      console.log('Component cleanup - preserving BluetoothService for app stability');
     };
   }, []);
 
@@ -226,6 +237,12 @@ export default function App() {
       // Start foreground service for continuous operation
       await ForegroundService.startForegroundService();
       
+      // Set up callback for device discovery from foreground service
+      ForegroundService.setDevicesFoundCallback((devices) => {
+        console.log(`📱 Received ${devices.length} devices from foreground service`);
+        setAvailableDevices(devices);
+      });
+      
       // Check if battery optimization button should be shown (Android only)
       if (Platform.OS === 'android') {
         try {
@@ -263,6 +280,74 @@ export default function App() {
     ForegroundService.stopForegroundService();
   };
 
+  const handleScanForDevices = async () => {
+    if (!BluetoothService.isInitialized) {
+      console.log('BluetoothService not initialized yet');
+      Alert.alert('Please Wait', 'Bluetooth service is still initializing. Please try again in a moment.');
+      return;
+    }
+
+    setIsScanning(true);
+    try {
+      console.log('🔍 Manual scan triggered from UI...');
+      
+      // Try to get devices from foreground service first (if it has recent data)
+      let devices = ForegroundService.getAvailableDevices();
+      
+      // If no devices or want fresh scan, trigger manual scan
+      if (devices.length === 0) {
+        console.log('🔍 No cached devices, performing fresh scan...');
+        devices = await ForegroundService.triggerManualScan();
+      } else {
+        console.log(`📱 Using cached devices from foreground service: ${devices.length} devices`);
+        // Still trigger a background refresh for next time
+        ForegroundService.triggerManualScan().catch(error => {
+          console.warn('Background refresh scan failed:', error);
+        });
+      }
+      
+      console.log(`Found ${devices.length} devices`);
+      setAvailableDevices(devices);
+      
+      if (devices.length === 0) {
+        Alert.alert('No Devices Found', 'No Bluetooth devices were found. Make sure your iConsole device is powered on and in pairing mode.\n\nThe foreground service will continue scanning automatically.');
+      } else {
+        Alert.alert('Scan Complete', `Found ${devices.length} Bluetooth devices. Select one from the dropdown to connect.\n\nThe foreground service will continue scanning for more devices automatically.`);
+      }
+    } catch (error) {
+      console.error('❌ Device scan failed:', error);
+      Alert.alert('Scan Failed', `Could not scan for devices: ${error.message}\n\nThe foreground service will continue trying automatically.`);
+      setAvailableDevices([]);
+    } finally {
+      setIsScanning(false);
+    }
+  };
+
+  const handleConnectToSelectedDevice = async () => {
+    if (!selectedDevice) {
+      Alert.alert('No Device Selected', 'Please select a device from the dropdown first.');
+      return;
+    }
+
+    if (!BluetoothService.isInitialized) {
+      console.log('BluetoothService not initialized yet');
+      Alert.alert('Please Wait', 'Bluetooth service is still initializing. Please try again in a moment.');
+      return;
+    }
+
+    setIsConnecting(true);
+    try {
+      console.log(`🔌 Connecting to selected device: ${selectedDevice.displayName}`);
+      await BluetoothService.connectToDeviceById(selectedDevice.id);
+      console.log('✅ Connected successfully!');
+      Alert.alert('Connected', `Successfully connected to ${selectedDevice.displayName}!`);
+    } catch (error) {
+      console.error('❌ Connection failed:', error);
+      Alert.alert('Connection Failed', `Could not connect to ${selectedDevice.displayName}: ${error.message}`);
+      setIsConnecting(false);
+    }
+  };
+
   const handleConnect = async () => {
     // Check if BluetoothService is initialized
     if (!BluetoothService.isInitialized) {
@@ -283,18 +368,23 @@ export default function App() {
         Alert.alert('Error', `Failed to disconnect: ${error.message}`);
       }
     } else {
-      // Connect
-      console.log('🔌 User requested connect');
-      setIsConnecting(true);
-      try {
-        console.log('🔍 Starting findAndConnect...');
-        await BluetoothService.findAndConnect();
-        console.log('✅ Connected successfully!');
-        Alert.alert('Connected', 'Successfully connected to iConsole device!');
-      } catch (error) {
-        console.error('❌ Connection failed:', error);
-        Alert.alert('Connection Failed', `Could not connect to iConsole device: ${error.message}`);
-        setIsConnecting(false);
+      // If a device is selected, connect to it, otherwise use auto-connect
+      if (selectedDevice) {
+        await handleConnectToSelectedDevice();
+      } else {
+        // Auto-connect (backward compatibility)
+        console.log('🔌 User requested auto-connect');
+        setIsConnecting(true);
+        try {
+          console.log('🔍 Starting findAndConnect...');
+          await BluetoothService.findAndConnect();
+          console.log('✅ Connected successfully!');
+          Alert.alert('Connected', 'Successfully connected to iConsole device!');
+        } catch (error) {
+          console.error('❌ Connection failed:', error);
+          Alert.alert('Connection Failed', `Could not connect to iConsole device: ${error.message}`);
+          setIsConnecting(false);
+        }
       }
     }
   };
@@ -482,7 +572,7 @@ export default function App() {
 
       {/* Simple Header */}
       <View style={styles.simpleHeader}>
-        <Text style={styles.appTitle}>VELOOP</Text>
+        <Text style={styles.appTitle}>SITZIP</Text>
       </View>
 
       <ScrollView 
@@ -751,7 +841,7 @@ export default function App() {
               iConsole Device
             </Text>
             <Text variant="bodyMedium" style={styles.connectionStatus}>
-              {isConnected ? 'Connected' : 'Disconnected'}
+              {isConnected ? (selectedDevice ? `Connected to ${selectedDevice.displayName}` : 'Connected') : 'Disconnected'}
             </Text>
           </View>
           <Chip 
@@ -761,6 +851,69 @@ export default function App() {
           >
             {isConnected ? 'Online' : 'Offline'}
           </Chip>
+        </View>
+        
+        <Divider style={styles.connectionDivider} />
+        
+        {/* Device Selection Section */}
+        <View style={styles.deviceSelectionSection}>
+          <Text variant="titleMedium" style={styles.sectionTitle}>Device Selection</Text>
+          
+          {/* Scan for Devices Button */}
+          <Button
+            mode="outlined"
+            onPress={handleScanForDevices}
+            disabled={isScanning || isConnecting}
+            style={styles.scanButton}
+            contentStyle={styles.buttonContent}
+            icon="radar"
+          >
+            {isScanning ? (
+              <View style={styles.scanningContainer}>
+                <ActivityIndicator size="small" color={customColors.primary} />
+                <Text style={styles.scanningText}>Scanning...</Text>
+              </View>
+            ) : (
+              'Scan for Devices'
+            )}
+          </Button>
+
+          {/* Device Dropdown */}
+          {availableDevices.length > 0 && (
+            <View style={styles.dropdownContainer}>
+              <Text variant="bodyMedium" style={styles.dropdownLabel}>Select Device:</Text>
+              <Menu
+                visible={deviceMenuVisible}
+                onDismiss={() => setDeviceMenuVisible(false)}
+                anchor={
+                  <Button
+                    mode="outlined"
+                    onPress={() => setDeviceMenuVisible(true)}
+                    style={styles.dropdownButton}
+                    contentStyle={styles.dropdownButtonContent}
+                    icon="chevron-down"
+                  >
+                    {selectedDevice ? selectedDevice.displayName : 'Choose Device'}
+                  </Button>
+                }
+                contentStyle={styles.menuContent}
+              >
+                {availableDevices.map((device, index) => (
+                  <Menu.Item
+                    key={device.id}
+                    onPress={() => {
+                      setSelectedDevice(device);
+                      setDeviceMenuVisible(false);
+                    }}
+                    title={device.displayName}
+                    leadingIcon="bluetooth"
+                    style={styles.menuItem}
+                    titleStyle={styles.menuItemTitle}
+                  />
+                ))}
+              </Menu>
+            </View>
+          )}
         </View>
         
         <Divider style={styles.connectionDivider} />
@@ -779,8 +932,10 @@ export default function App() {
               <ActivityIndicator color="white" />
             ) : isConnected ? (
               'Disconnect Device'
+            ) : selectedDevice ? (
+              `Connect to ${selectedDevice.displayName}`
             ) : (
-              'Connect to iConsole'
+              'Auto-Connect to iConsole'
             )}
           </Button>
 
@@ -1244,6 +1399,53 @@ const styles = StyleSheet.create({
   },
   connectionButton: {
     marginVertical: 4,
+  },
+  // Device selection styles
+  deviceSelectionSection: {
+    marginVertical: 8,
+  },
+  sectionTitle: {
+    color: customColors.onSurface,
+    marginBottom: 12,
+    fontWeight: '600',
+  },
+  scanButton: {
+    marginVertical: 8,
+  },
+  scanningContainer: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+  },
+  scanningText: {
+    color: customColors.primary,
+    fontSize: 14,
+  },
+  dropdownContainer: {
+    marginTop: 12,
+  },
+  dropdownLabel: {
+    color: customColors.onSurfaceVariant,
+    marginBottom: 8,
+  },
+  dropdownButton: {
+    justifyContent: 'flex-start',
+    borderColor: customColors.outline,
+  },
+  dropdownButtonContent: {
+    justifyContent: 'flex-start',
+    paddingVertical: 8,
+  },
+  menuContent: {
+    backgroundColor: customColors.surfaceVariant,
+    borderRadius: 8,
+    marginTop: 8,
+  },
+  menuItem: {
+    backgroundColor: 'transparent',
+  },
+  menuItemTitle: {
+    color: customColors.onSurface,
   },
   // Feature surface styles (for Community and Settings)
   featureSurface: {

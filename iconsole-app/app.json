@@ -1,7 +1,7 @@
 {
   "expo": {
-    "name": "iConsole Tracker",
-    "slug": "iconsole-app",
+    "name": "SitZip",
+    "slug": "sitzip-app",
     "version": "1.0.0",
     "orientation": "portrait",
     "userInterfaceStyle": "dark",
@@ -15,8 +15,8 @@
     "ios": {
       "supportsTablet": true,
       "infoPlist": {
-        "NSBluetoothAlwaysUsageDescription": "This app uses Bluetooth to connect to your iConsole exercise bike and track your workout data.",
-        "NSBluetoothPeripheralUsageDescription": "This app uses Bluetooth to connect to your iConsole exercise bike and track your workout data.",
+        "NSBluetoothAlwaysUsageDescription": "This app uses Bluetooth to connect to your exercise bike and track your workout data.",
+        "NSBluetoothPeripheralUsageDescription": "This app uses Bluetooth to connect to your exercise bike and track your workout data.",
         "UIBackgroundModes": [
           "background-fetch",
           "background-processing",
@@ -24,7 +24,7 @@
           "background-processing"
         ]
       },
-      "bundleIdentifier": "com.vkiker.iconsoleapp"
+      "bundleIdentifier": "com.vkiker.sitzipapp"
     },
     "android": {
       "adaptiveIcon": {

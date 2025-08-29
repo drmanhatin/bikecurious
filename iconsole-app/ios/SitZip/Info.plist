@@ -7,7 +7,7 @@
     <key>CFBundleDevelopmentRegion</key>
     <string>$(DEVELOPMENT_LANGUAGE)</string>
     <key>CFBundleDisplayName</key>
-    <string>iConsole Tracker</string>
+    <string>SitZip</string>
     <key>CFBundleExecutable</key>
     <string>$(EXECUTABLE_NAME)</string>
     <key>CFBundleIdentifier</key>
@@ -27,13 +27,13 @@
       <dict>
         <key>CFBundleURLSchemes</key>
         <array>
-          <string>com.vkiker.iconsoleapp</string>
+          <string>com.vkiker.sitzipapp</string>
         </array>
       </dict>
       <dict>
         <key>CFBundleURLSchemes</key>
         <array>
-          <string>exp+iconsole-app</string>
+          <string>exp+sitzip-app</string>
         </array>
       </dict>
     </array>
@@ -51,9 +51,9 @@
       <true/>
     </dict>
     <key>NSBluetoothAlwaysUsageDescription</key>
-    <string>This app uses Bluetooth to connect to your iConsole exercise bike and track your workout data.</string>
+    <string>This app uses Bluetooth to connect to your exercise bike and track your workout data.</string>
     <key>NSBluetoothPeripheralUsageDescription</key>
-    <string>This app uses Bluetooth to connect to your iConsole exercise bike and track your workout data.</string>
+    <string>This app uses Bluetooth to connect to your exercise bike and track your workout data.</string>
     <key>NSLocationAlwaysAndWhenInUseUsageDescription</key>
     <string>Allow $(PRODUCT_NAME) to access your location</string>
     <key>NSLocationAlwaysUsageDescription</key>

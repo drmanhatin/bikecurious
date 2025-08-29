@@ -16,6 +16,35 @@ class ForegroundService {
     this.lastNotificationUpdate = 0;
     this.notificationThrottleMs = 1000; // Minimum 1 second between notification updates
     this.notificationCheckInterval = null; // Periodic check to ensure notification exists
+    
+    // Device scanning properties
+    this.scanInterval = null;
+    this.isScanning = false;
+    this.availableDevices = [];
+    this.lastScanTime = 0;
+    this.onDevicesFound = null; // Callback for when devices are found
+    
+    // Smart scanning configuration
+    this.activeScanIntervalMs = 30000; // 30 seconds when app is foreground
+    this.reducedScanIntervalMs = 300000; // 5 minutes when screen locked
+    this.appInForeground = true; // Track app state
+    this.connectionHealthInterval = null;
+    this.connectionHealthIntervalMs = 60000; // Check connection health every minute
+    
+    // Auto-connect configuration
+    this.autoConnectEnabled = true; // Enable auto-connect to iConsole devices
+    this.autoConnectOnlyInForeground = false; // Allow auto-connect even when app is in background
+    
+    // Connection stability configuration
+    this.connectionStabilityEnabled = true; // Enable connection stability features
+    this.keepAliveInterval = null;
+    this.keepAliveIntervalMs = 30000; // Send keep-alive every 30 seconds
+    this.quickReconnectEnabled = true; // Enable quick reconnection for immediate disconnects
+    this.quickReconnectTimeoutMs = 3000; // Consider disconnects within 3 seconds as "quick"
+    this.lastConnectionTime = 0;
+    this.connectionAttempts = 0;
+    this.maxQuickReconnectAttempts = 5;
+    
     // DON'T call setupNotificationHandlers() in constructor - it blocks the main thread
   }
 
@@ -212,6 +241,7 @@ class ForegroundService {
     try {
       await notifee.registerForegroundService((notification) => {
         console.log('🔥 Foreground service callback triggered!', notification);
+        console.log('🔥 Callback notification details:', JSON.stringify(notification, null, 2));
         
         return new Promise(() => {
           console.log('✅ Foreground service task registered and running');
@@ -219,11 +249,31 @@ class ForegroundService {
           // Setup all the monitoring and updates
           setTimeout(() => {
             console.log('🔧 Setting up service components...');
-            this.setupAppStateListener();
-            this.setupConnectionMonitoring();
-            this.setupSpeedDebugging();
-            this.startContinuousUpdatesInService();
-            console.log('✅ All foreground service setup completed');
+            try {
+              console.log('📱 Setting up app state listener...');
+              this.setupAppStateListener();
+              console.log('✅ App state listener setup complete');
+              
+              console.log('🔗 Setting up connection monitoring...');
+              this.setupConnectionMonitoring();
+              console.log('✅ Connection monitoring setup complete');
+              
+              console.log('📊 Setting up speed debugging...');
+              this.setupSpeedDebugging();
+              console.log('✅ Speed debugging setup complete');
+              
+              console.log('🔄 Starting continuous updates...');
+              this.startContinuousUpdatesInService();
+              console.log('✅ Continuous updates started');
+              
+              console.log('🧠 Starting smart scanning...');
+              this.startSmartScanning();
+              console.log('✅ Smart scanning started');
+              
+              console.log('✅ All foreground service setup completed');
+            } catch (error) {
+              console.error('❌ Error during foreground service setup:', error);
+            }
           }, 100);
           
           // Long running task - keep the service running until explicitly stopped
@@ -264,6 +314,21 @@ class ForegroundService {
       this.isRunning = true;
       console.log('✅ Foreground service started with proper registration');
       
+      // Start scanning immediately as fallback (in case callback doesn't trigger)
+      console.log('🔍 Starting scanning as fallback after service registration...');
+      setTimeout(() => {
+        try {
+          if (!this.scanInterval) { // Only start if not already started
+            console.log('🧠 Fallback: Starting smart scanning...');
+            this.startSmartScanning();
+          } else {
+            console.log('✅ Scanning already started, skipping fallback');
+          }
+        } catch (error) {
+          console.error('❌ Fallback scanning start failed:', error);
+        }
+      }, 2000); // Wait 2 seconds for callback to potentially trigger first
+      
     } catch (error) {
       console.error('❌ Failed to start foreground service:', error);
       throw error;
@@ -301,14 +366,22 @@ class ForegroundService {
 
   setupAppStateListener() {
     this.appStateSubscription = AppState.addEventListener('change', (nextAppState) => {
-      console.log(`📱 App state changed to: ${nextAppState}`);
+      console.log(`📱 [APP-STATE] App state changed to: ${nextAppState}`);
+      
+      const wasInForeground = this.appInForeground;
+      this.appInForeground = nextAppState === 'active';
       
       if (nextAppState === 'background') {
-        console.log('🔄 App backgrounded - maintaining Bluetooth connection');
-        // Keep Bluetooth connection alive and continue updates
+        console.log('🔄 [APP-STATE] App backgrounded - switching to battery-optimized mode');
+        console.log('🔋 [APP-STATE] Reducing scan frequency and focusing on connection maintenance');
+        this.switchToBackgroundMode();
       } else if (nextAppState === 'active') {
-        console.log('🔄 App foregrounded - resuming normal operation');
+        console.log('🔄 [APP-STATE] App foregrounded - resuming active scanning');
+        this.switchToForegroundMode();
       }
+      
+      // Log state change
+      console.log(`📊 [APP-STATE] Scanning mode: ${wasInForeground ? 'foreground' : 'background'} -> ${this.appInForeground ? 'foreground' : 'background'}`);
     });
   }
 
@@ -385,13 +458,74 @@ class ForegroundService {
         originalCallback(isConnected);
       }
       
-      // Then handle our reconnection logic
+      // Then handle our reconnection logic and smart scanning
       if (!isConnected && !this.isReconnecting) {
-        console.log('🔄 Connection lost - starting reconnection attempts');
-        this.startReconnectionProcess();
+        const disconnectTime = Date.now();
+        const connectionDuration = this.lastConnectionTime ? disconnectTime - this.lastConnectionTime : 0;
+        
+        console.log(`🔄 [CONNECTION] Connection lost after ${connectionDuration}ms - analyzing disconnect type`);
+        
+        // Check if this is a quick disconnect (connection lost within a few seconds)
+        const isQuickDisconnect = connectionDuration > 0 && connectionDuration < this.quickReconnectTimeoutMs;
+        
+        if (isQuickDisconnect && this.quickReconnectEnabled && this.connectionAttempts < this.maxQuickReconnectAttempts) {
+          console.log(`⚡ [QUICK-RECONNECT] Quick disconnect detected (${connectionDuration}ms) - attempting immediate reconnection (attempt ${this.connectionAttempts + 1}/${this.maxQuickReconnectAttempts})`);
+          this.handleQuickReconnect();
+        } else {
+          if (isQuickDisconnect && this.connectionAttempts >= this.maxQuickReconnectAttempts) {
+            console.log(`⚠️ [QUICK-RECONNECT] Max quick reconnect attempts reached (${this.maxQuickReconnectAttempts}) - falling back to normal reconnection`);
+          }
+          
+          console.log('🔄 Connection lost - starting standard reconnection process');
+          this.startReconnectionProcess();
+          
+          // Adjust scanning based on current mode
+          if (this.appInForeground) {
+            console.log('🌟 [SMART-SCAN] Connection lost in foreground - resuming active scanning');
+            this.switchToForegroundMode();
+          } else {
+            console.log('🌙 [SMART-SCAN] Connection lost in background - starting reduced scanning');
+            this.switchToBackgroundMode();
+          }
+        }
+        
+        // Stop keep-alive when disconnected
+        this.stopKeepAlive();
+        
       } else if (isConnected && this.isReconnecting) {
         console.log('✅ Reconnection successful - stopping reconnection process');
         this.stopReconnectionProcess();
+        
+        // Record successful connection time
+        this.lastConnectionTime = Date.now();
+        this.connectionAttempts = 0; // Reset quick reconnect attempts
+        
+        // Start keep-alive for connection stability
+        if (this.connectionStabilityEnabled) {
+          this.startKeepAlive();
+        }
+      } else if (isConnected && !this.isReconnecting) {
+        // Initial connection established
+        console.log('✅ [CONNECTION] Initial connection established');
+        this.lastConnectionTime = Date.now();
+        this.connectionAttempts = 0;
+        
+        // Start keep-alive for connection stability
+        if (this.connectionStabilityEnabled) {
+          this.startKeepAlive();
+        }
+      }
+      
+      // Update scanning status based on connection
+      if (isConnected) {
+        console.log('✅ [SMART-SCAN] Connected - pausing scanning (connection maintenance mode)');
+        // Stop scanning when connected - just maintain connection
+        if (this.scanInterval) {
+          clearInterval(this.scanInterval);
+          this.scanInterval = null;
+        }
+      } else {
+        console.log('🔍 [SMART-SCAN] Disconnected - resuming appropriate scanning mode');
       }
     };
   }
@@ -485,6 +619,684 @@ class ForegroundService {
       clearInterval(this.notificationCheckInterval);
       this.notificationCheckInterval = null;
       console.log('🛑 Notification watchdog stopped');
+    }
+  }
+
+  // Smart scanning methods - optimized for battery and reliability
+  startSmartScanning() {
+    const startTime = new Date().toISOString();
+    console.log(`🧠 [SMART-SCAN] *** Starting smart scanning at ${startTime} ***`);
+    console.log(`⚙️ [SMART-SCAN] Configuration: active=${this.activeScanIntervalMs/1000}s, reduced=${this.reducedScanIntervalMs/1000}s`);
+    
+    try {
+      // Clear any existing intervals
+      this.stopSmartScanning();
+
+      // Log initial state
+      console.log(`📊 [SMART-SCAN] Initial state: connected=${BluetoothService.isConnected}, foreground=${this.appInForeground}, initialized=${BluetoothService.isInitialized}`);
+
+      // Start connection health monitoring
+      this.startConnectionHealthMonitoring();
+
+      // Start appropriate scanning mode
+      if (this.appInForeground) {
+        this.switchToForegroundMode();
+      } else {
+        this.switchToBackgroundMode();
+      }
+
+      console.log(`🧠 [SMART-SCAN] Smart scanning initialized successfully`);
+      
+    } catch (error) {
+      console.error(`❌ [SMART-SCAN] Error in startSmartScanning():`, error);
+      throw error;
+    }
+  }
+
+  switchToForegroundMode() {
+    console.log(`🌟 [SMART-SCAN] Switching to FOREGROUND mode (active scanning)`);
+    
+    // Clear existing scan interval
+    if (this.scanInterval) {
+      clearInterval(this.scanInterval);
+      this.scanInterval = null;
+    }
+
+    // Start immediate scan if not connected
+    if (!BluetoothService.isConnected && !this.isScanning) {
+      console.log('🚀 [SMART-SCAN] Starting immediate foreground scan (not connected)');
+      this.performDeviceScan();
+    }
+
+    // Set up active scanning interval
+    this.scanInterval = setInterval(() => {
+      this.handlePeriodicScan('FOREGROUND');
+    }, this.activeScanIntervalMs);
+
+    console.log(`🌟 [SMART-SCAN] Foreground mode active (scanning every ${this.activeScanIntervalMs/1000}s when disconnected)`);
+  }
+
+  switchToBackgroundMode() {
+    console.log(`🌙 [SMART-SCAN] Switching to BACKGROUND mode (reduced scanning)`);
+    
+    // Clear existing scan interval
+    if (this.scanInterval) {
+      clearInterval(this.scanInterval);
+      this.scanInterval = null;
+    }
+
+    // Only scan if disconnected - focus on connection maintenance
+    if (!BluetoothService.isConnected) {
+      console.log('🔋 [SMART-SCAN] Not connected - setting up reduced scanning');
+      
+      // Set up reduced scanning interval
+      this.scanInterval = setInterval(() => {
+        this.handlePeriodicScan('BACKGROUND');
+      }, this.reducedScanIntervalMs);
+      
+      console.log(`🌙 [SMART-SCAN] Background mode active (scanning every ${this.reducedScanIntervalMs/1000}s when disconnected)`);
+    } else {
+      console.log('✅ [SMART-SCAN] Connected - no scanning needed in background mode');
+    }
+  }
+
+  handlePeriodicScan(mode) {
+    const now = new Date().toISOString();
+    const timeSinceLastScan = Date.now() - this.lastScanTime;
+    
+    // Only scan if not connected and not already scanning
+    if (!BluetoothService.isConnected && !this.isScanning) {
+      console.log(`🔍 [SMART-SCAN-${mode}] Periodic scan triggered at ${now} (${timeSinceLastScan}ms since last scan)`);
+      this.performDeviceScan();
+    } else if (BluetoothService.isConnected) {
+      console.log(`✅ [SMART-SCAN-${mode}] Connected - skipping scan cycle`);
+    } else if (this.isScanning) {
+      console.log(`⏳ [SMART-SCAN-${mode}] Already scanning - skipping cycle (scan in progress for ${Date.now() - this.lastScanTime}ms)`);
+    }
+  }
+
+  startConnectionHealthMonitoring() {
+    console.log(`💓 [HEALTH] Starting connection health monitoring (every ${this.connectionHealthIntervalMs/1000}s)`);
+    
+    // Clear existing health monitoring
+    if (this.connectionHealthInterval) {
+      clearInterval(this.connectionHealthInterval);
+    }
+
+    this.connectionHealthInterval = setInterval(() => {
+      this.checkConnectionHealth();
+    }, this.connectionHealthIntervalMs);
+  }
+
+  checkConnectionHealth() {
+    const healthTime = new Date().toISOString();
+    
+    if (BluetoothService.isConnected && BluetoothService.device) {
+      console.log(`💓 [HEALTH] Connection health check at ${healthTime} - device connected`);
+      
+      // Enhanced health check with connection duration
+      const connectionDuration = this.lastConnectionTime ? Date.now() - this.lastConnectionTime : 0;
+      console.log(`💓 [HEALTH] Device: ${BluetoothService.device.name || 'Unknown'}, Speed: ${BluetoothService.currentSpeed?.toFixed(1) || '0.0'} km/h, Connected for: ${(connectionDuration/1000).toFixed(1)}s`);
+      
+      // Check for connection stability issues
+      if (connectionDuration > 0 && connectionDuration < 10000) { // Less than 10 seconds
+        console.warn(`⚠️ [HEALTH] Recent connection - monitoring for stability (${(connectionDuration/1000).toFixed(1)}s)`);
+      }
+    } else if (BluetoothService.isConnected && !BluetoothService.device) {
+      console.warn(`⚠️ [HEALTH] Inconsistent state: isConnected=true but no device object`);
+    } else {
+      console.log(`💓 [HEALTH] Not connected - health check skipped`);
+    }
+  }
+
+  // Quick reconnect for immediate disconnects
+  async handleQuickReconnect() {
+    this.connectionAttempts++;
+    const reconnectId = Math.random().toString(36).substr(2, 4);
+    
+    console.log(`⚡ [QUICK-RECONNECT-${reconnectId}] Starting quick reconnection attempt ${this.connectionAttempts}/${this.maxQuickReconnectAttempts}`);
+    
+    try {
+      // Update notification for quick reconnect
+      await this.updateNotificationForQuickReconnect();
+      
+      // Short delay before reconnecting (500ms)
+      await new Promise(resolve => setTimeout(resolve, 500));
+      
+      // Try to reconnect using the last known device
+      if (BluetoothService.device && BluetoothService.device.id) {
+        console.log(`⚡ [QUICK-RECONNECT-${reconnectId}] Attempting to reconnect to last device: ${BluetoothService.device.id.slice(-8)}`);
+        await BluetoothService.connectToDeviceById(BluetoothService.device.id);
+        console.log(`✅ [QUICK-RECONNECT-${reconnectId}] Quick reconnection successful!`);
+      } else {
+        console.log(`⚡ [QUICK-RECONNECT-${reconnectId}] No last device available - falling back to scan and connect`);
+        await BluetoothService.findAndConnect();
+        console.log(`✅ [QUICK-RECONNECT-${reconnectId}] Quick reconnection via scan successful!`);
+      }
+      
+    } catch (error) {
+      console.error(`❌ [QUICK-RECONNECT-${reconnectId}] Quick reconnection failed:`, error);
+      
+      // If quick reconnect fails, fall back to normal reconnection
+      if (this.connectionAttempts >= this.maxQuickReconnectAttempts) {
+        console.log(`⚠️ [QUICK-RECONNECT-${reconnectId}] Max attempts reached - switching to normal reconnection`);
+        this.startReconnectionProcess();
+      } else {
+        // Try again after a short delay
+        setTimeout(() => {
+          if (!BluetoothService.isConnected) {
+            this.handleQuickReconnect();
+          }
+        }, 1000);
+      }
+    }
+  }
+
+  // Keep-alive mechanism to maintain connection stability
+  startKeepAlive() {
+    if (!this.connectionStabilityEnabled) {
+      return;
+    }
+    
+    console.log(`💓 [KEEP-ALIVE] Starting connection keep-alive (every ${this.keepAliveIntervalMs/1000}s)`);
+    
+    // Clear existing keep-alive
+    this.stopKeepAlive();
+    
+    this.keepAliveInterval = setInterval(() => {
+      this.performKeepAlive();
+    }, this.keepAliveIntervalMs);
+  }
+
+  stopKeepAlive() {
+    if (this.keepAliveInterval) {
+      console.log(`💓 [KEEP-ALIVE] Stopping connection keep-alive`);
+      clearInterval(this.keepAliveInterval);
+      this.keepAliveInterval = null;
+    }
+  }
+
+  async performKeepAlive() {
+    if (!BluetoothService.isConnected || !BluetoothService.device) {
+      console.log(`💓 [KEEP-ALIVE] Not connected - skipping keep-alive`);
+      return;
+    }
+    
+    const keepAliveTime = new Date().toISOString();
+    const connectionDuration = this.lastConnectionTime ? Date.now() - this.lastConnectionTime : 0;
+    
+    try {
+      console.log(`💓 [KEEP-ALIVE] Performing keep-alive check at ${keepAliveTime} (connected for ${(connectionDuration/1000).toFixed(1)}s)`);
+      
+      // Simple keep-alive: check if device is still reachable
+      const isConnected = await BluetoothService.device.isConnected();
+      
+      if (isConnected) {
+        console.log(`💓 [KEEP-ALIVE] Device responsive - connection stable`);
+        
+        // Optional: Read a characteristic to ensure data flow
+        try {
+          const services = await BluetoothService.device.services();
+          if (services && services.length > 0) {
+            console.log(`💓 [KEEP-ALIVE] Services accessible - ${services.length} services available`);
+          }
+        } catch (serviceError) {
+          console.warn(`⚠️ [KEEP-ALIVE] Service check failed (but device still connected):`, serviceError.message);
+        }
+        
+      } else {
+        console.warn(`⚠️ [KEEP-ALIVE] Device not responsive - connection may be unstable`);
+      }
+      
+    } catch (error) {
+      console.error(`❌ [KEEP-ALIVE] Keep-alive check failed:`, error);
+      console.log(`🔄 [KEEP-ALIVE] Connection may be lost - monitoring for disconnect event`);
+    }
+  }
+
+  async updateNotificationForQuickReconnect() {
+    try {
+      const notification = this.createNotificationConfig(
+        `🚴 iConsole Tracker ⚡`,
+        `Quick reconnecting... (${this.connectionAttempts}/${this.maxQuickReconnectAttempts})`,
+        {
+          progress: {
+            max: this.maxQuickReconnectAttempts,
+            current: this.connectionAttempts,
+            indeterminate: true,
+          },
+          style: {
+            type: 1, // BigTextStyle
+            text: `Status: Quick reconnection in progress...\nAttempt: ${this.connectionAttempts}/${this.maxQuickReconnectAttempts}\nConnection lost after brief period`,
+          },
+          connectionStatus: '⚡'
+        }
+      );
+      
+      await notifee.displayNotification(notification);
+    } catch (error) {
+      console.error('❌ Failed to update notification for quick reconnect:', error);
+    }
+  }
+
+  async autoConnectToDevice(device, scanId) {
+    const connectStartTime = Date.now();
+    console.log(`🚀 [AUTO-CONNECT-${scanId}] Starting auto-connection to "${device.displayName}"`);
+    
+    try {
+      // Set connecting state to prevent other connection attempts
+      BluetoothService.isConnecting = true;
+      
+      // Update notification to show connecting status
+      await this.updateNotificationForAutoConnect(device);
+      
+      // Use BluetoothService to connect to the specific device
+      console.log(`🔌 [AUTO-CONNECT-${scanId}] Calling BluetoothService.connectToDeviceById("${device.id}")`);
+      await BluetoothService.connectToDeviceById(device.id);
+      
+      const connectDuration = Date.now() - connectStartTime;
+      console.log(`✅ [AUTO-CONNECT-${scanId}] Auto-connection successful in ${connectDuration}ms!`);
+      console.log(`🎯 [AUTO-CONNECT-${scanId}] Connected to: "${device.displayName}" (${device.id.slice(-8)})`);
+      
+      // Record connection time for stability tracking
+      this.lastConnectionTime = Date.now();
+      this.connectionAttempts = 0;
+      
+      // Start keep-alive for connection stability
+      if (this.connectionStabilityEnabled) {
+        console.log(`💓 [AUTO-CONNECT-${scanId}] Starting keep-alive for connection stability`);
+        this.startKeepAlive();
+      }
+      
+      // Update notification to show successful connection
+      await this.updateNotificationForAutoConnectSuccess(device);
+      
+      // Notify the app about the auto-connection (if callback is set)
+      if (this.onDevicesFound && typeof this.onDevicesFound === 'function') {
+        console.log(`📞 [AUTO-CONNECT-${scanId}] Notifying app about successful auto-connection`);
+        try {
+          // Update the available devices list to include the connected device
+          this.availableDevices = this.availableDevices.map(d => 
+            d.id === device.id ? { ...d, isConnected: true } : d
+          );
+          this.onDevicesFound(this.availableDevices);
+        } catch (callbackError) {
+          console.error(`❌ [AUTO-CONNECT-${scanId}] App notification error:`, callbackError);
+        }
+      }
+      
+    } catch (error) {
+      const connectDuration = Date.now() - connectStartTime;
+      console.error(`❌ [AUTO-CONNECT-${scanId}] Auto-connection failed after ${connectDuration}ms:`, error);
+      console.error(`❌ [AUTO-CONNECT-${scanId}] Error details:`, {
+        message: error.message,
+        deviceName: device.displayName,
+        deviceId: device.id.slice(-8),
+        rssi: device.rssi
+      });
+      
+      // Update notification to show connection failure
+      await this.updateNotificationForAutoConnectFailure(device, error);
+      
+      // Reset connecting state
+      BluetoothService.isConnecting = false;
+      
+    } finally {
+      const totalDuration = Date.now() - connectStartTime;
+      console.log(`🏁 [AUTO-CONNECT-${scanId}] Auto-connection attempt completed - total duration: ${totalDuration}ms`);
+    }
+  }
+
+  async updateNotificationForAutoConnect(device) {
+    try {
+      const notification = this.createNotificationConfig(
+        `🚴 iConsole Tracker 🚀`,
+        `Auto-connecting to ${device.displayName}...`,
+        {
+          progress: {
+            max: 100,
+            current: 0,
+            indeterminate: true,
+          },
+          style: {
+            type: 1, // BigTextStyle
+            text: `Status: Auto-connecting to iConsole device...\nDevice: ${device.displayName}\nSignal: ${device.rssi}dBm`,
+          },
+          connectionStatus: '🚀'
+        }
+      );
+      
+      await notifee.displayNotification(notification);
+    } catch (error) {
+      console.error('❌ Failed to update notification for auto-connect:', error);
+    }
+  }
+
+  async updateNotificationForAutoConnectSuccess(device) {
+    try {
+      const notification = this.createNotificationConfig(
+        `🚴 iConsole Tracker 🟢`,
+        `Auto-connected to ${device.displayName}!`,
+        {
+          style: {
+            type: 1, // BigTextStyle
+            text: `Status: Successfully auto-connected!\nDevice: ${device.displayName}\nReady to track speed and distance`,
+          },
+          connectionStatus: '🟢'
+        }
+      );
+      
+      await notifee.displayNotification(notification);
+    } catch (error) {
+      console.error('❌ Failed to update notification for auto-connect success:', error);
+    }
+  }
+
+  async updateNotificationForAutoConnectFailure(device, error) {
+    try {
+      const notification = this.createNotificationConfig(
+        `🚴 iConsole Tracker ⚠️`,
+        `Auto-connect to ${device.displayName} failed`,
+        {
+          style: {
+            type: 1, // BigTextStyle
+            text: `Status: Auto-connection failed\nDevice: ${device.displayName}\nError: ${error.message}\nWill continue scanning...`,
+          },
+          connectionStatus: '⚠️'
+        }
+      );
+      
+      await notifee.displayNotification(notification);
+    } catch (error) {
+      console.error('❌ Failed to update notification for auto-connect failure:', error);
+    }
+  }
+
+  async performDeviceScan() {
+    const scanId = Math.random().toString(36).substr(2, 6); // Generate unique scan ID
+    const scanStartTime = Date.now();
+    const scanStartISO = new Date().toISOString();
+    
+    console.log(`🔍 [FG-SCAN-${scanId}] Starting background device scan at ${scanStartISO}`);
+    
+    if (this.isScanning) {
+      const ongoingScanDuration = Date.now() - this.lastScanTime;
+      console.log(`⚠️ [FG-SCAN-${scanId}] Scan already in progress for ${ongoingScanDuration}ms - aborting`);
+      return;
+    }
+
+    if (!BluetoothService.isInitialized) {
+      console.log(`⚠️ [FG-SCAN-${scanId}] BluetoothService not initialized - skipping scan`);
+      return;
+    }
+
+    // Log scan context
+    const timeSinceLastScan = this.lastScanTime ? Date.now() - this.lastScanTime : 'never';
+    console.log(`📊 [FG-SCAN-${scanId}] Scan context: last_scan=${timeSinceLastScan}ms ago, cached_devices=${this.availableDevices.length}, connected=${BluetoothService.isConnected}`);
+
+    this.isScanning = true;
+    this.lastScanTime = scanStartTime;
+    
+    try {
+      console.log(`🔍 [FG-SCAN-${scanId}] Performing background device scan...`);
+      
+      // Update notification to show scanning status
+      console.log(`📱 [FG-SCAN-${scanId}] Updating notification for scanning status`);
+      await this.updateNotificationForScanning();
+      
+      // Scan for devices
+      console.log(`📡 [FG-SCAN-${scanId}] Calling BluetoothService.scanForDevices()`);
+      const devices = await BluetoothService.scanForDevices();
+      
+      const scanDuration = Date.now() - scanStartTime;
+      console.log(`📡 [FG-SCAN-${scanId}] Background scan completed in ${scanDuration}ms - found ${devices.length} devices`);
+      
+      // Log device details
+      if (devices.length > 0) {
+        console.log(`📱 [FG-SCAN-${scanId}] Device breakdown:`);
+        devices.forEach((device, index) => {
+          console.log(`   ${index + 1}. "${device.displayName}" (${device.id.slice(-8)}) RSSI: ${device.rssi}dBm`);
+        });
+        
+        // Highlight iConsole devices and auto-connect
+        const iConsoleDevices = devices.filter(d => 
+          (d.name || '').toLowerCase().includes('iconsole') || 
+          (d.name || '').toLowerCase().includes('console')
+        );
+        if (iConsoleDevices.length > 0) {
+          console.log(`🎯 [FG-SCAN-${scanId}] Found ${iConsoleDevices.length} potential iConsole device(s):`);
+          iConsoleDevices.forEach(device => {
+            console.log(`   🎯 "${device.displayName}" (${device.id.slice(-8)}) RSSI: ${device.rssi}dBm`);
+          });
+          
+          // Auto-connect to the first (strongest signal) iConsole device found
+          if (this.autoConnectEnabled && !BluetoothService.isConnected && !BluetoothService.isConnecting) {
+            // Check if auto-connect is allowed in current mode
+            const allowAutoConnect = !this.autoConnectOnlyInForeground || this.appInForeground;
+            
+            if (allowAutoConnect) {
+              const bestDevice = iConsoleDevices.reduce((best, current) => 
+                (current.rssi > best.rssi) ? current : best
+              );
+              
+              console.log(`🚀 [FG-SCAN-${scanId}] Auto-connecting to best iConsole device: "${bestDevice.displayName}" (RSSI: ${bestDevice.rssi}dBm)`);
+              console.log(`📊 [FG-SCAN-${scanId}] Auto-connect context: enabled=${this.autoConnectEnabled}, foreground=${this.appInForeground}, onlyInForeground=${this.autoConnectOnlyInForeground}`);
+              
+              // Trigger auto-connection
+              this.autoConnectToDevice(bestDevice, scanId);
+            } else {
+              console.log(`⚠️ [FG-SCAN-${scanId}] iConsole device found but auto-connect disabled in background mode`);
+            }
+          } else if (!this.autoConnectEnabled) {
+            console.log(`⚠️ [FG-SCAN-${scanId}] iConsole device found but auto-connect is disabled`);
+          } else {
+            console.log(`⚠️ [FG-SCAN-${scanId}] iConsole device found but already connected/connecting - skipping auto-connect`);
+          }
+        }
+      } else {
+        console.log(`❓ [FG-SCAN-${scanId}] No devices found - check if Bluetooth is enabled and devices are in range`);
+      }
+      
+      // Compare with previous scan results
+      const previousDeviceCount = this.availableDevices.length;
+      const newDevices = devices.filter(d => !this.availableDevices.some(existing => existing.id === d.id));
+      const lostDevices = this.availableDevices.filter(existing => !devices.some(d => d.id === existing.id));
+      
+      if (newDevices.length > 0) {
+        console.log(`🆕 [FG-SCAN-${scanId}] New devices found: ${newDevices.map(d => d.displayName).join(', ')}`);
+      }
+      if (lostDevices.length > 0) {
+        console.log(`📉 [FG-SCAN-${scanId}] Devices no longer visible: ${lostDevices.map(d => d.displayName).join(', ')}`);
+      }
+      
+      // Update available devices list
+      console.log(`💾 [FG-SCAN-${scanId}] Updating device cache: ${previousDeviceCount} -> ${devices.length} devices`);
+      this.availableDevices = devices;
+      
+      // Notify callback if set (for App.js integration)
+      if (this.onDevicesFound && typeof this.onDevicesFound === 'function') {
+        console.log(`📞 [FG-SCAN-${scanId}] Calling onDevicesFound callback with ${devices.length} devices`);
+        try {
+          this.onDevicesFound(devices);
+          console.log(`✅ [FG-SCAN-${scanId}] Callback executed successfully`);
+        } catch (callbackError) {
+          console.error(`❌ [FG-SCAN-${scanId}] Callback error:`, callbackError);
+        }
+      } else {
+        console.log(`📞 [FG-SCAN-${scanId}] No callback set - skipping notification`);
+      }
+      
+      // Update notification with scan results
+      console.log(`📱 [FG-SCAN-${scanId}] Updating notification with scan results`);
+      await this.updateNotificationForScanResults(devices.length);
+      
+      console.log(`✅ [FG-SCAN-${scanId}] Background scan completed successfully in ${scanDuration}ms`);
+      
+    } catch (error) {
+      const scanDuration = Date.now() - scanStartTime;
+      console.error(`❌ [FG-SCAN-${scanId}] Background device scan failed after ${scanDuration}ms:`, error);
+      console.error(`❌ [FG-SCAN-${scanId}] Error details:`, {
+        message: error.message,
+        stack: error.stack?.split('\n').slice(0, 3).join('\n'), // First 3 lines of stack
+        name: error.name
+      });
+      
+      await this.updateNotificationForScanError();
+    } finally {
+      const totalDuration = Date.now() - scanStartTime;
+      this.isScanning = false;
+      console.log(`🏁 [FG-SCAN-${scanId}] Scan cleanup completed - total duration: ${totalDuration}ms`);
+    }
+  }
+
+  async updateNotificationForScanning() {
+    try {
+      const notification = this.createNotificationConfig(
+        `🚴 iConsole Tracker 🔍`,
+        `Scanning for devices... • Speed: ${BluetoothService.currentSpeed?.toFixed(1) || '0.0'} km/h`,
+        {
+          progress: {
+            max: 100,
+            current: 0,
+            indeterminate: true,
+          },
+          style: {
+            type: 1, // BigTextStyle
+            text: `Status: Scanning for nearby iConsole devices...\nCurrent Speed: ${BluetoothService.currentSpeed?.toFixed(1) || '0.0'} km/h\nTotal Distance: ${BluetoothService.totalDistance?.toFixed(2) || '0.00'} km`,
+          },
+          connectionStatus: '🔍'
+        }
+      );
+      
+      await notifee.displayNotification(notification);
+    } catch (error) {
+      console.error('❌ Failed to update notification for scanning:', error);
+    }
+  }
+
+  async updateNotificationForScanResults(deviceCount) {
+    try {
+      const connectionStatus = BluetoothService.isConnected ? '🟢' : '🔴';
+      const statusText = BluetoothService.isConnected 
+        ? 'Connected' 
+        : `Found ${deviceCount} device${deviceCount !== 1 ? 's' : ''}`;
+      
+      const notification = this.createNotificationConfig(
+        `🚴 iConsole Tracker ${connectionStatus}`,
+        `${statusText} • Speed: ${BluetoothService.currentSpeed?.toFixed(1) || '0.0'} km/h`,
+        {
+          progress: {
+            max: 50,
+            current: Math.min(BluetoothService.currentSpeed || 0, 50),
+            indeterminate: false,
+          },
+          style: {
+            type: 1, // BigTextStyle
+            text: `Status: ${statusText}\nCurrent Speed: ${BluetoothService.currentSpeed?.toFixed(1) || '0.0'} km/h\nTotal Distance: ${BluetoothService.totalDistance?.toFixed(2) || '0.00'} km\nLast scan: ${new Date().toLocaleTimeString()}`,
+          },
+          connectionStatus
+        }
+      );
+      
+      await notifee.displayNotification(notification);
+    } catch (error) {
+      console.error('❌ Failed to update notification for scan results:', error);
+    }
+  }
+
+  async updateNotificationForScanError() {
+    try {
+      const notification = this.createNotificationConfig(
+        `🚴 iConsole Tracker ⚠️`,
+        `Scan failed • Speed: ${BluetoothService.currentSpeed?.toFixed(1) || '0.0'} km/h`,
+        {
+          style: {
+            type: 1, // BigTextStyle
+            text: `Status: Device scan failed - will retry in ${this.scanIntervalMs/1000}s\nCurrent Speed: ${BluetoothService.currentSpeed?.toFixed(1) || '0.0'} km/h\nTotal Distance: ${BluetoothService.totalDistance?.toFixed(2) || '0.00'} km`,
+          },
+          connectionStatus: '⚠️'
+        }
+      );
+      
+      await notifee.displayNotification(notification);
+    } catch (error) {
+      console.error('❌ Failed to update notification for scan error:', error);
+    }
+  }
+
+  stopSmartScanning() {
+    const stopTime = new Date().toISOString();
+    console.log(`🛑 [SMART-SCAN] Stopping smart scanning at ${stopTime}`);
+    
+    // Stop scan interval
+    if (this.scanInterval) {
+      console.log('🔄 [SMART-SCAN] Clearing scan interval');
+      clearInterval(this.scanInterval);
+      this.scanInterval = null;
+    }
+    
+    // Stop connection health monitoring
+    if (this.connectionHealthInterval) {
+      console.log('💓 [SMART-SCAN] Stopping connection health monitoring');
+      clearInterval(this.connectionHealthInterval);
+      this.connectionHealthInterval = null;
+    }
+    
+    // Stop keep-alive
+    this.stopKeepAlive();
+    
+    const wasScanning = this.isScanning;
+    const deviceCount = this.availableDevices.length;
+    
+    this.isScanning = false;
+    this.availableDevices = [];
+    
+    console.log(`✅ [SMART-SCAN] Smart scanning stopped - was_scanning=${wasScanning}, cleared_${deviceCount}_devices`);
+  }
+
+  // Method to get current available devices
+  getAvailableDevices() {
+    const deviceCount = this.availableDevices.length;
+    const lastScanAge = this.lastScanTime ? Date.now() - this.lastScanTime : 'never';
+    console.log(`📱 [FG-SCAN] getAvailableDevices() called - returning ${deviceCount} devices (last_scan=${lastScanAge}ms ago)`);
+    
+    if (deviceCount > 0) {
+      console.log(`📱 [FG-SCAN] Available devices: ${this.availableDevices.map(d => d.displayName).join(', ')}`);
+    }
+    
+    return this.availableDevices;
+  }
+
+  // Method to set callback for device discovery
+  setDevicesFoundCallback(callback) {
+    const callbackType = typeof callback;
+    console.log(`📞 [FG-SCAN] setDevicesFoundCallback() called with ${callbackType} callback`);
+    
+    if (callbackType === 'function') {
+      this.onDevicesFound = callback;
+      console.log('✅ [FG-SCAN] Device discovery callback registered successfully');
+    } else {
+      console.warn(`⚠️ [FG-SCAN] Invalid callback type: ${callbackType} (expected function)`);
+      this.onDevicesFound = null;
+    }
+  }
+
+  // Method to manually trigger a scan
+  async triggerManualScan() {
+    const triggerTime = new Date().toISOString();
+    console.log(`🔍 [FG-SCAN] Manual device scan triggered at ${triggerTime}`);
+    console.log(`📊 [FG-SCAN] Pre-scan state: scanning=${this.isScanning}, cached_devices=${this.availableDevices.length}, connected=${BluetoothService.isConnected}`);
+    
+    const startTime = Date.now();
+    try {
+      await this.performDeviceScan();
+      const duration = Date.now() - startTime;
+      console.log(`✅ [FG-SCAN] Manual scan completed in ${duration}ms - returning ${this.availableDevices.length} devices`);
+      return this.availableDevices;
+    } catch (error) {
+      const duration = Date.now() - startTime;
+      console.error(`❌ [FG-SCAN] Manual scan failed after ${duration}ms:`, error);
+      throw error;
     }
   }
 
@@ -747,6 +1559,12 @@ class ForegroundService {
 
     // Stop notification watchdog
     this.stopNotificationWatchdog();
+
+    // Stop smart scanning
+    this.stopSmartScanning();
+
+    // Stop keep-alive
+    this.stopKeepAlive();
 
     // Stop reconnection process
     this.stopReconnectionProcess();
